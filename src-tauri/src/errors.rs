@@ -20,6 +20,7 @@ pub enum ErrorCode {
     SanitizedNameEmpty,
     UndoOutputMissing,
     UndoOutputModified,
+    InvalidSettings,
     Cancelled,
     Internal,
 }
@@ -48,6 +49,7 @@ pub enum ProcessingStage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Error)]
+#[serde(rename_all = "camelCase")]
 #[error("{user_message}")]
 pub struct AppError {
     pub code: ErrorCode,

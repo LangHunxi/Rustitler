@@ -29,6 +29,8 @@ export type ExtractMethod =
   | "imageOcrTesseract"
   | "pdfOcrFallbackTesseract";
 
+export type SourceUnit = "pdfPoint" | "pixel" | "unknown";
+
 export type CandidateSource = "pdfLayout" | "wordParagraph" | "ocrBlock";
 
 export type ScoreDecision = "autoOutput" | "pending" | "failed";
@@ -43,6 +45,15 @@ export type PendingReason =
   | "ioError";
 
 export type ProcessingStage = "ingest" | "extract" | "score" | "rename" | "history" | "undo";
+
+export type ErrorCategory =
+  | "input"
+  | "extraction"
+  | "scoring"
+  | "output"
+  | "history"
+  | "settings"
+  | "system";
 
 export type ErrorCode =
   | "unsupportedFormat"
@@ -61,6 +72,7 @@ export type ErrorCode =
   | "sanitizedNameEmpty"
   | "undoOutputMissing"
   | "undoOutputModified"
+  | "invalidSettings"
   | "cancelled"
   | "internal";
 
@@ -68,11 +80,63 @@ export type ErrorCode =
 
 export interface AppErrorView {
   code: ErrorCode;
+  category: ErrorCategory;
   userMessage: string;
   technicalDetail?: string;
   retryable: boolean;
   filePath?: string;
   stage?: ProcessingStage;
+}
+
+export interface SourceFingerprint {
+  normalizedPath: string;
+  sizeBytes: number;
+  modifiedTime: string;
+}
+
+export interface NormalizedBox {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
+
+export interface RawBox {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
+
+export interface LayoutBlock {
+  text: string;
+  bbox: NormalizedBox;
+  rawBBox?: RawBox;
+  fontSize?: number;
+  bold?: boolean;
+  ocrConfidence?: number;
+  lineIndex?: number;
+}
+
+export interface ExtractedPage {
+  pageIndex: number;
+  width: number;
+  height: number;
+  unit: SourceUnit;
+  blocks: LayoutBlock[];
+}
+
+export interface ParagraphBlock {
+  text: string;
+  paragraphIndex: number;
+}
+
+export interface ExtractedDocument {
+  sourceType: FileType;
+  extractMethod: ExtractMethod;
+  pages: ExtractedPage[];
+  paragraphs: ParagraphBlock[];
+  diagnosticsRef?: string;
 }
 
 export interface CategoryScores {
@@ -100,12 +164,14 @@ export interface CandidateTitle {
   ruleDetails: RuleDetail[];
 }
 
-export interface ScoringResultView {
+export interface ScoringResult {
   finalTitle?: string;
   confidence: number;
   candidates: CandidateTitle[];
   decision: ScoreDecision;
 }
+
+export type ScoringResultView = ScoringResult;
 
 export interface FileJobView {
   fileJobId: FileJobId;
@@ -114,6 +180,22 @@ export interface FileJobView {
   fileName: string;
   fileType: FileType;
   status: FileStatus;
+  recognizedTitle?: string;
+  confidence?: number;
+  outputPath?: string;
+  failureReason?: string;
+  pendingReason?: PendingReason;
+}
+
+export interface FileJob {
+  fileJobId: FileJobId;
+  batchId: BatchId;
+  sourcePath: string;
+  sourceParentPath?: string;
+  fileName: string;
+  fileType: FileType;
+  status: FileStatus;
+  fingerprint: SourceFingerprint;
   recognizedTitle?: string;
   confidence?: number;
   outputPath?: string;
@@ -182,14 +264,24 @@ export interface HistoryBatchRow {
   batchId: BatchId;
   createdAt: string;
   status: BatchStatus;
+  settingsSnapshotId: string;
   summary: BatchSummary;
+}
+
+export interface HistoryFileResult {
+  file: FileJobView;
+  sourceFingerprint: SourceFingerprint;
+  scoringResult?: ScoringResult;
+  error?: AppErrorView;
 }
 
 export interface HistoryBatchDetail {
   batchId: BatchId;
   createdAt: string;
   status: BatchStatus;
-  files: FileJobView[];
+  settingsSnapshotId: string;
+  summary: BatchSummary;
+  files: HistoryFileResult[];
 }
 
 export interface UndoResult {
