@@ -1,0 +1,48 @@
+[package]
+name = "rustitler"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "rustitler_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri          = { version = "2", features = [] }
+serde          = { version = "1", features = ["derive"] }
+serde_json     = { version = "1" }
+tokio          = { version = "1", features = ["full"] }
+rusqlite       = { version = "0.31", features = ["bundled"] }
+uuid           = { version = "1", features = ["v4"] }
+chrono         = { version = "0.4", features = ["serde"] }
+regex          = { version = "1" }
+sha2           = { version = "0.10" }
+hex            = { version = "0.4" }
+tempfile       = { version = "3" }
+log            = { version = "0.4" }
+thiserror      = { version = "1" }
+anyhow         = { version = "1" }
+
+# DS-01..04: PDF coordinate text extraction
+# Spike: validate API surface, Chinese text, bbox output, error types.
+liteparse = { version = "*", optional = true }
+
+# DS-05..07: Word/DOCX plain-text extraction
+# Spike: validate paragraph boundaries, Chinese retention, error form.
+undoc = { version = "*", optional = true }
+
+# DS-11..13: Tesseract OCR — use tesseract-rs (same lib liteparse already pulls in,
+# avoids duplicate native-link conflict with tesseract-sys).
+tesseract-rs = { version = "0.2", optional = true }
+
+[features]
+default = []
+# Enable all dependency spikes for validation:
+#   cargo test --features spikes 2>&1 | tee doc/tasks/spike-results.txt
+spikes = ["dep:liteparse", "dep:undoc", "dep:tesseract-rs"]
+
+[dev-dependencies]
+tempfile = { version = "3" }
