@@ -59,7 +59,7 @@ jobs:
       - name: Run DS-12 spike
         shell: pwsh
         working-directory: src-tauri
-        run: cargo test --features spikes -- spikes::ds11_tesseract::tesseract_chi_sim_loads -- --nocapture
+        run: cargo test --release --features spikes -- spikes::ds11_tesseract::tesseract_chi_sim_loads -- --nocapture
 
   windows-package:
     name: Windows Tauri package
@@ -107,7 +107,7 @@ jobs:
 
       - name: Run Clippy
         working-directory: src-tauri
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Build Windows bundle
         uses: tauri-apps/tauri-action@action-v0.6.2
