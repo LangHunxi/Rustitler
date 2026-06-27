@@ -8,6 +8,7 @@
     "build": "tsc && vite build",
     "test": "vitest run",
     "test:offline-assets": "node --test scripts/prepare-offline-assets.node-test.mjs",
+    "test:offline-package-workflow": "node --test scripts/offline-package-workflow.node-test.mjs",
     "test:package-size-report": "node --test scripts/package-size-report.node-test.mjs",
     "prepare:offline-assets": "node scripts/prepare-offline-assets.mjs",
     "package:size-report": "node scripts/package-size-report.mjs",
