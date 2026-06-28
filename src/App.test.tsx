@@ -192,6 +192,14 @@ describe("App", () => {
     expect(mocks.startBatch).not.toHaveBeenCalled();
   });
 
+  it("shows settings load errors on the queue view", async () => {
+    mocks.loadSettings.mockRejectedValue(new Error("settings.json 无法读取"));
+    await renderApp();
+
+    expect(await screen.findByText("settings.json 无法读取")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "导入文件" })).toBeDisabled();
+  });
+
   it("offers explicit file and folder import actions", async () => {
     await renderApp();
 
@@ -209,6 +217,30 @@ describe("App", () => {
     await waitFor(() =>
       expect(mocks.startBatch).toHaveBeenCalledWith(["/input/a.pdf", "/input/b.docx"], settingsFixture),
     );
+  });
+
+  it("shows a useful error when the file picker fails", async () => {
+    mocks.selectFiles.mockRejectedValue(new Error("dialog not available"));
+    await renderApp();
+
+    await waitFor(() => expect(screen.getByText("支持 PDF、Word、图片；文件夹仅扫描第一层。")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "导入文件" }));
+
+    expect(await screen.findByText("dialog not available")).toBeInTheDocument();
+    expect(mocks.startBatch).not.toHaveBeenCalled();
+  });
+
+  it("shows a useful error when starting an import fails", async () => {
+    mocks.selectFiles.mockResolvedValue(["/input/a.pdf"]);
+    mocks.startBatch.mockRejectedValue({
+      userMessage: "无法读取所选文件，请检查权限。",
+    });
+    await renderApp();
+
+    await waitFor(() => expect(screen.getByText("支持 PDF、Word、图片；文件夹仅扫描第一层。")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "导入文件" }));
+
+    expect(await screen.findByText("无法读取所选文件，请检查权限。")).toBeInTheDocument();
   });
 
   it("starts a batch from a selected folder", async () => {

@@ -65,6 +65,13 @@ const errorText = (error: AppErrorView | string | undefined) => {
   return typeof error === "string" ? error : error.userMessage;
 };
 
+const unknownErrorText = (error: unknown) => {
+  if (typeof error === "object" && error && "userMessage" in error) {
+    return String(error.userMessage);
+  }
+  return error instanceof Error ? error.message : String(error);
+};
+
 const fileStem = (fileName: string) => {
   const dot = fileName.lastIndexOf(".");
   return dot > 0 ? fileName.slice(0, dot) : fileName;
@@ -89,7 +96,7 @@ export default function App() {
   const settingsState = useSettingsState();
 
   useEffect(() => {
-    void settingsStore.load();
+    void settingsStore.load().catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -132,8 +139,20 @@ export default function App() {
       return;
     }
     setImportError("");
-    await batchStore.start(paths, settings);
-    setTab("queue");
+    try {
+      await batchStore.start(paths, settings);
+      setTab("queue");
+    } catch (error) {
+      setImportError(unknownErrorText(error));
+    }
+  };
+
+  const importFromDialog = async (selectPaths: () => Promise<string[]>) => {
+    try {
+      await startImport(await selectPaths());
+    } catch (error) {
+      setImportError(unknownErrorText(error));
+    }
   };
 
   return (
@@ -162,12 +181,9 @@ export default function App() {
             batchState={batchState}
             settingsReady={Boolean(settingsState.draft)}
             importError={importError}
-            onImportFiles={async () => {
-              await startImport(await selectFiles());
-            }}
-            onImportFolder={async () => {
-              await startImport(await selectFolder());
-            }}
+            settingsError={settingsState.error}
+            onImportFiles={() => importFromDialog(selectFiles)}
+            onImportFolder={() => importFromDialog(selectFolder)}
           />
         ) : null}
         {tab === "history" ? <HistoryView /> : null}
@@ -181,12 +197,14 @@ function QueueView({
   batchState,
   settingsReady,
   importError,
+  settingsError,
   onImportFiles,
   onImportFolder,
 }: {
   batchState: ReturnType<typeof useBatchState>;
   settingsReady: boolean;
   importError: string;
+  settingsError?: string;
   onImportFiles: () => Promise<void>;
   onImportFolder: () => Promise<void>;
 }) {
@@ -228,6 +246,7 @@ function QueueView({
         </div>
 
         {importError ? <p className="error">{importError}</p> : null}
+        {settingsError ? <p className="error">{settingsError}</p> : null}
         {errorText(batchState.error) ? <p className="error">{errorText(batchState.error)}</p> : null}
 
         <div className="file-table" role="table" aria-label="文件队列">
