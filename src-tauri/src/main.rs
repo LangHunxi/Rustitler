@@ -11,6 +11,7 @@ fn main() {
     }
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             use rustitler_lib::commands::{AppState, TauriEventEmitter};
             use rustitler_lib::packaging::runtime_assets_from_resource_dir;

@@ -1,4 +1,4 @@
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import type { TauriDragDropEvent } from "../types/ipc";
 import type { StopListening } from "./events";
 
@@ -6,7 +6,7 @@ export const subscribeFileDrops = async (
   onDrop: (paths: string[]) => void,
   onActiveChange?: (active: boolean) => void,
 ): Promise<StopListening> => {
-  const unlisten = await getCurrentWindow().onDragDropEvent((event) => {
+  const unlisten = await getCurrentWebview().onDragDropEvent((event) => {
     const payload = event.payload as TauriDragDropEvent;
 
     if (payload.type === "enter") {

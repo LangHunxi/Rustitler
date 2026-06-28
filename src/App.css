@@ -151,8 +151,20 @@ main {
   margin-bottom: 12px;
 }
 
+.drop-zone > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
 .drop-zone span {
   color: #697586;
+}
+
+.import-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .file-table {

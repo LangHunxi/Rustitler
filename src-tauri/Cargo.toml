@@ -38,6 +38,7 @@ undoc = { version = "*", optional = true }
 # avoids duplicate native-link conflict with tesseract-sys).
 tesseract-rs = { version = "0.2", optional = true }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"], optional = true }
+tauri-plugin-dialog = "2.7.1"
 
 [features]
 default = []

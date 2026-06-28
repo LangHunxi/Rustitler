@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { subscribeFileDrops } from "./api/dragDrop";
 import { subscribeBatchEvents } from "./api/events";
+import { selectFiles, selectFolder } from "./api/fileDialog";
 import {
   getHistoryBatch,
   listHistory,
@@ -83,6 +84,7 @@ const useSettingsState = () =>
 export default function App() {
   const [tab, setTab] = useState<Tab>("queue");
   const [dropActive, setDropActive] = useState(false);
+  const [importError, setImportError] = useState("");
   const batchState = useBatchState();
   const settingsState = useSettingsState();
 
@@ -105,16 +107,7 @@ export default function App() {
       }
     });
 
-    void subscribeFileDrops(
-      (paths) => {
-        const settings = settingsStore.getState().draft;
-        if (paths.length > 0 && settings) {
-          void batchStore.start(paths, settings);
-          setTab("queue");
-        }
-      },
-      setDropActive,
-    ).then((unlisten) => {
+    void subscribeFileDrops((paths) => void startImport(paths), setDropActive).then((unlisten) => {
       if (disposed) {
         unlisten();
       } else {
@@ -128,6 +121,20 @@ export default function App() {
       stopDrops?.();
     };
   }, []);
+
+  const startImport = async (paths: string[]) => {
+    const settings = settingsStore.getState().draft;
+    if (paths.length === 0) {
+      return;
+    }
+    if (!settings) {
+      setImportError("设置仍在加载，请稍后再导入。");
+      return;
+    }
+    setImportError("");
+    await batchStore.start(paths, settings);
+    setTab("queue");
+  };
 
   return (
     <div className={`app-shell ${dropActive ? "drop-active" : ""}`}>
@@ -151,7 +158,17 @@ export default function App() {
 
       <main>
         {tab === "queue" ? (
-          <QueueView batchState={batchState} settingsReady={Boolean(settingsState.draft)} />
+          <QueueView
+            batchState={batchState}
+            settingsReady={Boolean(settingsState.draft)}
+            importError={importError}
+            onImportFiles={async () => {
+              await startImport(await selectFiles());
+            }}
+            onImportFolder={async () => {
+              await startImport(await selectFolder());
+            }}
+          />
         ) : null}
         {tab === "history" ? <HistoryView /> : null}
         {tab === "settings" ? <SettingsView /> : null}
@@ -163,9 +180,15 @@ export default function App() {
 function QueueView({
   batchState,
   settingsReady,
+  importError,
+  onImportFiles,
+  onImportFolder,
 }: {
   batchState: ReturnType<typeof useBatchState>;
   settingsReady: boolean;
+  importError: string;
+  onImportFiles: () => Promise<void>;
+  onImportFolder: () => Promise<void>;
 }) {
   const selected =
     batchState.files.find((file) => file.fileJobId === batchState.selectedFileJobId) ??
@@ -190,10 +213,21 @@ function QueueView({
         </div>
 
         <div className="drop-zone">
-          <strong>拖入文件或文件夹开始处理</strong>
-          <span>{settingsReady ? "支持 PDF、Word、图片；文件夹仅扫描第一层。" : "正在加载设置。"}</span>
+          <div>
+            <strong>拖入文件或文件夹开始处理</strong>
+            <span>{settingsReady ? "支持 PDF、Word、图片；文件夹仅扫描第一层。" : "正在加载设置。"}</span>
+          </div>
+          <div className="import-actions">
+            <button type="button" onClick={() => void onImportFiles()} disabled={!settingsReady}>
+              导入文件
+            </button>
+            <button type="button" className="secondary" onClick={() => void onImportFolder()} disabled={!settingsReady}>
+              导入文件夹
+            </button>
+          </div>
         </div>
 
+        {importError ? <p className="error">{importError}</p> : null}
         {errorText(batchState.error) ? <p className="error">{errorText(batchState.error)}</p> : null}
 
         <div className="file-table" role="table" aria-label="文件队列">
