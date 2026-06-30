@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const HISTORY_DB_NAME: &str = "history.sqlite";
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 #[derive(Debug, Clone)]
 pub struct BatchRecord {
@@ -118,6 +118,7 @@ fn initialize_schema(conn: &Connection) -> Result<(), AppError> {
             output_path TEXT,
             failure_reason TEXT,
             pending_reason TEXT,
+            duplicate_warning TEXT,
             fingerprint_normalized_path TEXT NOT NULL,
             fingerprint_size_bytes INTEGER NOT NULL,
             fingerprint_modified_time TEXT NOT NULL,
@@ -194,6 +195,8 @@ fn initialize_schema(conn: &Connection) -> Result<(), AppError> {
     )
     .map_err(|err| history_error(format!("初始化历史数据库失败：{err}")))?;
 
+    migrate_schema(conn)?;
+
     conn.execute(
         "INSERT INTO schema_meta(key, value)
          VALUES ('schema_version', ?1)
@@ -203,6 +206,30 @@ fn initialize_schema(conn: &Connection) -> Result<(), AppError> {
     .map_err(|err| history_error(format!("记录历史数据库版本失败：{err}")))?;
 
     Ok(())
+}
+
+fn migrate_schema(conn: &Connection) -> Result<(), AppError> {
+    if !column_exists(conn, "file_results", "duplicate_warning")? {
+        conn.execute(
+            "ALTER TABLE file_results ADD COLUMN duplicate_warning TEXT",
+            [],
+        )
+        .map_err(|err| history_error(format!("迁移历史数据库失败：{err}")))?;
+    }
+
+    Ok(())
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, AppError> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|err| history_error(format!("读取历史数据库结构失败：{err}")))?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|err| history_error(format!("读取历史数据库结构失败：{err}")))?;
+    let columns = collect_rows(rows)?;
+
+    Ok(columns.iter().any(|name| name == column))
 }
 
 pub fn save_settings_snapshot(
@@ -312,6 +339,7 @@ pub fn record_file_result(conn: &Connection, record: &FileResultRecord) -> Resul
             output_path,
             failure_reason,
             pending_reason,
+            duplicate_warning,
             fingerprint_normalized_path,
             fingerprint_size_bytes,
             fingerprint_modified_time,
@@ -320,7 +348,7 @@ pub fn record_file_result(conn: &Connection, record: &FileResultRecord) -> Resul
             scoring_decision,
             output_kind,
             error_json
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
         params![
             record.file.file_job_id.0,
             record.file.batch_id.0,
@@ -333,6 +361,7 @@ pub fn record_file_result(conn: &Connection, record: &FileResultRecord) -> Resul
             record.file.output_path,
             record.file.failure_reason,
             pending_reason,
+            record.file.duplicate_warning,
             record.source_fingerprint.normalized_path,
             u64_to_i64(record.source_fingerprint.size_bytes)?,
             record.source_fingerprint.modified_time,
@@ -436,6 +465,7 @@ pub fn get_history_batch(
                 output_path,
                 failure_reason,
                 pending_reason,
+                duplicate_warning,
                 fingerprint_normalized_path,
                 fingerprint_size_bytes,
                 fingerprint_modified_time,
@@ -480,6 +510,7 @@ pub fn get_history_file_result(
             output_path,
             failure_reason,
             pending_reason,
+            duplicate_warning,
             fingerprint_normalized_path,
             fingerprint_size_bytes,
             fingerprint_modified_time,
@@ -922,16 +953,17 @@ fn file_result_from_row(
             .get::<_, Option<String>>(10)?
             .map(|text| enum_from_db_text(&text))
             .transpose()?,
+        duplicate_warning: row.get(11)?,
     };
     let source_fingerprint = SourceFingerprint {
-        normalized_path: row.get(11)?,
-        size_bytes: i64_to_u64_sql(row.get(12)?)?,
-        modified_time: row.get(13)?,
+        normalized_path: row.get(12)?,
+        size_bytes: i64_to_u64_sql(row.get(13)?)?,
+        modified_time: row.get(14)?,
     };
-    let scoring_final_title: Option<String> = row.get(14)?;
-    let scoring_confidence: Option<i64> = row.get(15)?;
-    let scoring_decision: Option<String> = row.get(16)?;
-    let error_json: Option<String> = row.get(17)?;
+    let scoring_final_title: Option<String> = row.get(15)?;
+    let scoring_confidence: Option<i64> = row.get(16)?;
+    let scoring_decision: Option<String> = row.get(17)?;
+    let error_json: Option<String> = row.get(18)?;
     let candidates = load_candidates(conn, &file_job_id)?;
     let scoring_result = match scoring_decision {
         Some(decision) => Some(ScoringResult {
@@ -949,7 +981,7 @@ fn file_result_from_row(
         .map(|json| {
             serde_json::from_str(&json).map_err(|err| {
                 rusqlite::Error::FromSqlConversionFailure(
-                    17,
+                    18,
                     rusqlite::types::Type::Text,
                     Box::new(err),
                 )
@@ -1146,7 +1178,16 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
+
+        let duplicate_warning_columns: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('file_results') WHERE name = 'duplicate_warning'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(duplicate_warning_columns, 1);
 
         for table in [
             "batches",
@@ -1480,6 +1521,12 @@ mod tests {
             file.scoring_result.as_ref().unwrap().candidates[0].rule_details[0].rule_name,
             "keyword-default"
         );
+        assert!(file
+            .file
+            .duplicate_warning
+            .as_deref()
+            .unwrap()
+            .contains("old-batch"));
         assert_eq!(file.error.as_ref().unwrap().code, error.code);
     }
 
@@ -1506,7 +1553,10 @@ mod tests {
             confidence: Some(91),
             output_path: Some("/input/Rustitler 输出/劳动合同.pdf".into()),
             failure_reason: None,
-            pending_reason: Some(PendingReason::LowConfidence),
+            pending_reason: None,
+            duplicate_warning: Some(
+                "疑似重复：历史批次 old-batch 的文件 old-file 已处理过。".into(),
+            ),
         }
     }
 
@@ -1523,6 +1573,9 @@ mod tests {
             output_path: None,
             failure_reason: Some("可能已处理过".into()),
             pending_reason: Some(PendingReason::DuplicateSuspected),
+            duplicate_warning: Some(
+                "疑似重复：历史批次 old-batch 的文件 old-file 已处理过。".into(),
+            ),
         }
     }
 
@@ -1539,6 +1592,7 @@ mod tests {
             output_path: None,
             failure_reason: Some("不支持的文件格式，已跳过。".into()),
             pending_reason: Some(PendingReason::UnsupportedFormat),
+            duplicate_warning: None,
         }
     }
 

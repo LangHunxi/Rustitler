@@ -7,3 +7,10 @@ const packageJson = JSON.parse(fs.readFileSync("package.json", "utf8"));
 test("package exposes the tauri script expected by tauri-action", () => {
   assert.equal(packageJson.scripts.tauri, "tauri");
 });
+
+test("desktop dev script enables document extraction dependencies", () => {
+  assert.equal(
+    packageJson.scripts["tauri:dev:offline"],
+    "npm run prepare:offline-assets && tauri dev --features offline-bundle",
+  );
+});

@@ -14,14 +14,16 @@ describe("command wrappers", () => {
   });
 
   it("passes camelCase command arguments expected by Tauri", async () => {
-    const { startBatch, confirmPendingOutput, listHistory } = await import("./commands");
+    const { startBatch, confirmPendingOutput, selectCandidateTitle, listHistory } = await import("./commands");
     const settings = defaultSettings();
     invokeMock.mockResolvedValueOnce("batch-1");
+    invokeMock.mockResolvedValueOnce({ fileJobId: "file-1" });
     invokeMock.mockResolvedValueOnce({ fileJobId: "file-1" });
     invokeMock.mockResolvedValueOnce({ batches: [], total: 0 });
 
     await expect(startBatch(["/input/a.pdf"], settings)).resolves.toBe("batch-1");
     await confirmPendingOutput("file-1", "项目通知");
+    await selectCandidateTitle("file-1", "候选标题");
     await listHistory(20, 10);
 
     expect(invokeMock).toHaveBeenNthCalledWith(1, "start_batch", {
@@ -32,7 +34,11 @@ describe("command wrappers", () => {
       fileJobId: "file-1",
       editedNameStem: "项目通知",
     });
-    expect(invokeMock).toHaveBeenNthCalledWith(3, "list_history", {
+    expect(invokeMock).toHaveBeenNthCalledWith(3, "select_candidate_title", {
+      fileJobId: "file-1",
+      candidateText: "候选标题",
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(4, "list_history", {
       offset: 20,
       limit: 10,
     });

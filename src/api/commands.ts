@@ -25,6 +25,12 @@ export const confirmPendingOutput = (
 ): Promise<FileJobView> =>
   invoke<FileJobView>("confirm_pending_output", { fileJobId, editedNameStem });
 
+export const selectCandidateTitle = (
+  fileJobId: FileJobId,
+  candidateText: string,
+): Promise<FileJobView> =>
+  invoke<FileJobView>("select_candidate_title", { fileJobId, candidateText });
+
 export const undoBatch = (batchId: BatchId): Promise<UndoResult> =>
   invoke<UndoResult>("undo_batch", { batchId });
 

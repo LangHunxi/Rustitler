@@ -327,6 +327,78 @@ pub fn confirm_pending_output_impl(
     Ok(updated)
 }
 
+#[tauri::command]
+pub fn select_candidate_title(
+    state: tauri::State<'_, AppState>,
+    file_job_id: FileJobId,
+    candidate_text: String,
+) -> Result<FileJobView, AppError> {
+    select_candidate_title_impl(&state, file_job_id, candidate_text)
+}
+
+pub fn select_candidate_title_impl(
+    state: &AppState,
+    file_job_id: FileJobId,
+    candidate_text: impl AsRef<str>,
+) -> Result<FileJobView, AppError> {
+    let conn = history::open_history(&state.app_data_dir)?;
+    let existing = history::get_history_file_result(&conn, &file_job_id)?
+        .ok_or_else(|| command_error("找不到文件记录。", ProcessingStage::History))?;
+    let requested_title = validate_edited_name_stem(
+        candidate_text.as_ref(),
+        Path::new(&existing.file.source_path),
+    )?;
+    let scoring_result = existing
+        .scoring_result
+        .clone()
+        .ok_or_else(|| command_error("该文件没有可选候选标题。", ProcessingStage::Rename))?;
+    let selected_score = scoring_result
+        .candidates
+        .iter()
+        .find(|candidate| candidate.text == requested_title)
+        .map(|candidate| candidate.score)
+        .ok_or_else(|| {
+            command_error("只能选择该文件识别出的候选标题。", ProcessingStage::Rename)
+        })?;
+
+    let output_path =
+        rename::create_manual_output_copy(Path::new(&existing.file.source_path), &requested_title)?;
+    let mut updated = existing.file.clone();
+    updated.status = FileStatus::OutputCreated;
+    updated.recognized_title = Some(requested_title.clone());
+    updated.confidence = Some(selected_score);
+    updated.output_path = Some(output_path.display().to_string());
+    updated.failure_reason = None;
+    updated.pending_reason = None;
+
+    let mut updated_scoring_result = scoring_result;
+    updated_scoring_result.final_title = Some(requested_title);
+    updated_scoring_result.confidence = selected_score;
+
+    history::record_file_result(
+        &conn,
+        &FileResultRecord {
+            file: updated.clone(),
+            source_fingerprint: existing.source_fingerprint,
+            scoring_result: Some(updated_scoring_result),
+            error: None,
+            output_kind: Some(OutputKind::Manual),
+        },
+    )?;
+    history::record_undo_for_output(&conn, &file_job_id, &output_path)?;
+    history::refresh_batch_summary(&conn, &updated.batch_id)?;
+
+    state
+        .event_emitter
+        .emit_batch_event(&BatchEvent::FileOutputCreated {
+            batch_id: updated.batch_id.clone(),
+            file_job_id,
+            output_path: output_path.display().to_string(),
+        })?;
+
+    Ok(updated)
+}
+
 fn validate_edited_name_stem(input: &str, source_path: &Path) -> Result<String, AppError> {
     let trimmed = input.trim();
     if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
@@ -491,7 +563,8 @@ mod tests {
     use crate::errors::{ErrorCategory, ErrorCode};
     use crate::history::{BatchRecord, FileResultRecord};
     use crate::models::{
-        BatchStatus, BatchSummary, FileStatus, FileType, PendingReason, SourceFingerprint,
+        BatchStatus, BatchSummary, CandidateSource, CandidateTitle, CategoryScores, FileStatus,
+        FileType, PendingReason, ScoreDecision, ScoringResult, SourceFingerprint,
     };
     use crate::settings::create_settings_snapshot;
     use std::fs;
@@ -649,6 +722,53 @@ mod tests {
     }
 
     #[test]
+    fn select_candidate_title_reoutputs_existing_file_with_candidate_title() {
+        let state = test_state();
+        let source = state.app_data_dir.join("input").join("auto.pdf");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, b"document").unwrap();
+        let batch_id = BatchId("batch-select-candidate".into());
+        let file_job_id = FileJobId("file-select-candidate".into());
+        seed_output_history_with_candidates(&state, &batch_id, &file_job_id, &source);
+
+        let updated =
+            select_candidate_title_impl(&state, file_job_id.clone(), "第二候选标题").unwrap();
+
+        assert_eq!(updated.status, FileStatus::OutputCreated);
+        assert_eq!(updated.recognized_title.as_deref(), Some("第二候选标题"));
+        assert_eq!(updated.confidence, Some(76));
+        let output_path = updated.output_path.clone().unwrap();
+        assert_eq!(fs::read(&output_path).unwrap(), b"document");
+        assert!(output_path.ends_with("第二候选标题.pdf"));
+
+        let conn = history::open_history(&state.app_data_dir).unwrap();
+        let detail = history::get_history_file_result(&conn, &file_job_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            detail.file.recognized_title.as_deref(),
+            Some("第二候选标题")
+        );
+        assert_eq!(detail.file.confidence, Some(76));
+        assert_eq!(
+            detail.scoring_result.unwrap().final_title.as_deref(),
+            Some("第二候选标题")
+        );
+
+        let events = state.emitted_events();
+        assert!(matches!(
+            &events[0],
+            BatchEvent::FileOutputCreated {
+                batch_id: event_batch_id,
+                file_job_id: event_file_job_id,
+                output_path: event_output_path,
+            } if event_batch_id == &batch_id
+                && event_file_job_id == &file_job_id
+                && event_output_path == &output_path
+        ));
+    }
+
+    #[test]
     fn settings_commands_reuse_settings_validation_and_io() {
         let state = test_state();
         let imported_path = state.app_data_dir.join("import.json");
@@ -757,11 +877,109 @@ mod tests {
                     output_path: None,
                     failure_reason: Some("低置信度".into()),
                     pending_reason: Some(PendingReason::LowConfidence),
+                    duplicate_warning: None,
                 },
                 source_fingerprint: fingerprint_for(source),
                 scoring_result: None,
                 error: None,
                 output_kind: None,
+            },
+        )
+        .unwrap();
+    }
+
+    fn seed_output_history_with_candidates(
+        state: &AppState,
+        batch_id: &BatchId,
+        file_job_id: &FileJobId,
+        source: &std::path::Path,
+    ) {
+        let conn = history::open_history(&state.app_data_dir).unwrap();
+        let snapshot = create_settings_snapshot(&Settings::default());
+        history::save_settings_snapshot(&conn, &snapshot).unwrap();
+        history::create_batch(
+            &conn,
+            &BatchRecord {
+                batch_id: batch_id.clone(),
+                created_at: "2026-06-27T10:00:00Z".into(),
+                status: BatchStatus::Completed,
+                settings_snapshot_id: snapshot.id,
+                summary: BatchSummary {
+                    total: 1,
+                    output_created: 1,
+                    pending: 0,
+                    skipped: 0,
+                    failed: 0,
+                    cancelled: 0,
+                },
+            },
+        )
+        .unwrap();
+        history::record_file_result(
+            &conn,
+            &FileResultRecord {
+                file: FileJobView {
+                    file_job_id: file_job_id.clone(),
+                    batch_id: batch_id.clone(),
+                    source_path: source.display().to_string(),
+                    file_name: "auto.pdf".into(),
+                    file_type: FileType::Pdf,
+                    status: FileStatus::OutputCreated,
+                    recognized_title: Some("第一候选标题".into()),
+                    confidence: Some(90),
+                    output_path: Some(
+                        source
+                            .parent()
+                            .unwrap()
+                            .join("Rustitler 输出")
+                            .join("第一候选标题.pdf")
+                            .display()
+                            .to_string(),
+                    ),
+                    failure_reason: None,
+                    pending_reason: None,
+                    duplicate_warning: None,
+                },
+                source_fingerprint: fingerprint_for(source),
+                scoring_result: Some(ScoringResult {
+                    final_title: Some("第一候选标题".into()),
+                    confidence: 90,
+                    candidates: vec![
+                        CandidateTitle {
+                            text: "第一候选标题".into(),
+                            source: CandidateSource::PdfLayout,
+                            page_index: Some(0),
+                            paragraph_index: None,
+                            score: 90,
+                            category_scores: CategoryScores {
+                                layout: 30,
+                                position: 20,
+                                keyword: 20,
+                                text_quality: 20,
+                                penalty: 0,
+                            },
+                            rule_details: vec![],
+                        },
+                        CandidateTitle {
+                            text: "第二候选标题".into(),
+                            source: CandidateSource::PdfLayout,
+                            page_index: Some(0),
+                            paragraph_index: None,
+                            score: 76,
+                            category_scores: CategoryScores {
+                                layout: 25,
+                                position: 18,
+                                keyword: 15,
+                                text_quality: 18,
+                                penalty: 0,
+                            },
+                            rule_details: vec![],
+                        },
+                    ],
+                    decision: ScoreDecision::AutoOutput,
+                }),
+                error: None,
+                output_kind: Some(OutputKind::Auto),
             },
         )
         .unwrap();

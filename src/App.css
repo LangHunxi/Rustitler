@@ -314,6 +314,11 @@ summary {
   cursor: pointer;
 }
 
+.candidate-list details > button {
+  justify-self: end;
+  margin-top: 10px;
+}
+
 .score-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

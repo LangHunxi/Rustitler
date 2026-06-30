@@ -186,6 +186,7 @@ export interface FileJobView {
   outputPath?: string;
   failureReason?: string;
   pendingReason?: PendingReason;
+  duplicateWarning?: string;
 }
 
 export interface FileJob {
@@ -202,6 +203,7 @@ export interface FileJob {
   outputPath?: string;
   failureReason?: string;
   pendingReason?: PendingReason;
+  duplicateWarning?: string;
 }
 
 export interface BatchSummary {

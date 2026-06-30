@@ -1,6 +1,6 @@
 use crate::models::{
     CandidateSource, CandidateTitle, CategoryScores, ExtractMethod, ExtractedDocument, LayoutBlock,
-    ParagraphBlock, RuleDetail, ScoreDecision, ScoringProfile, ScoringResult,
+    NormalizedBox, ParagraphBlock, RuleDetail, ScoreDecision, ScoringProfile, ScoringResult,
 };
 use regex::Regex;
 
@@ -34,15 +34,19 @@ fn collect_candidates(
     profile: &ScoringProfile,
 ) -> Vec<CandidateTitle> {
     if !extracted.pages.is_empty() {
-        return extracted
-            .pages
-            .iter()
-            .flat_map(|page| {
-                page.blocks.iter().filter_map(|block| {
-                    score_layout_block(block, page.page_index, &extracted.extract_method, profile)
-                })
-            })
-            .collect();
+        let mut candidates = vec![];
+        for page in &extracted.pages {
+            candidates.extend(page.blocks.iter().filter_map(|block| {
+                score_layout_block(block, page.page_index, &extracted.extract_method, profile)
+            }));
+            candidates.extend(score_two_line_title_candidates(
+                &page.blocks,
+                page.page_index,
+                &extracted.extract_method,
+                profile,
+            ));
+        }
+        return candidates;
     }
 
     extracted
@@ -54,6 +58,141 @@ fn collect_candidates(
         .collect()
 }
 
+fn score_two_line_title_candidates(
+    blocks: &[LayoutBlock],
+    page_index: usize,
+    extract_method: &ExtractMethod,
+    profile: &ScoringProfile,
+) -> Vec<CandidateTitle> {
+    let mut ordered_blocks = blocks.iter().collect::<Vec<_>>();
+    ordered_blocks.sort_by(|a, b| {
+        a.bbox
+            .y0
+            .total_cmp(&b.bbox.y0)
+            .then_with(|| a.bbox.x0.total_cmp(&b.bbox.x0))
+    });
+
+    ordered_blocks
+        .windows(2)
+        .filter_map(|pair| {
+            let first = pair[0];
+            let second = pair[1];
+            build_two_line_title_block(first, second).and_then(|combined| {
+                let mut candidate =
+                    score_layout_block(&combined, page_index, extract_method, profile)?;
+                candidate.rule_details.push(RuleDetail {
+                    rule_name: "layout-two-line-title".into(),
+                    category: "layout".into(),
+                    delta: 8,
+                    description: "相邻两行版式接近，合并为标题候选".into(),
+                });
+                candidate.category_scores.layout += 8;
+                candidate.score = candidate.score.saturating_add(8).min(100);
+                Some(candidate)
+            })
+        })
+        .collect()
+}
+
+fn build_two_line_title_block(first: &LayoutBlock, second: &LayoutBlock) -> Option<LayoutBlock> {
+    let first_text = clean_candidate_text(&first.text);
+    let second_text = clean_candidate_text(&second.text);
+    if first_text.is_empty()
+        || second_text.is_empty()
+        || is_symbol_only_noise(&first_text)
+        || is_symbol_only_noise(&second_text)
+        || looks_like_noise(&first_text)
+        || looks_like_noise(&second_text)
+    {
+        return None;
+    }
+
+    let combined_text = format!(
+        "{}{}",
+        first_text.split_whitespace().collect::<String>(),
+        second_text.split_whitespace().collect::<String>()
+    );
+    let combined_char_count = combined_text.chars().count();
+    if !(6..=60).contains(&combined_char_count)
+        || looks_like_sentence(&combined_text)
+        || looks_like_promulgation_sentence(&combined_text)
+    {
+        return None;
+    }
+
+    if !two_lines_have_title_geometry(first, second) {
+        return None;
+    }
+
+    Some(LayoutBlock {
+        text: combined_text,
+        bbox: NormalizedBox {
+            x0: first.bbox.x0.min(second.bbox.x0),
+            y0: first.bbox.y0.min(second.bbox.y0),
+            x1: first.bbox.x1.max(second.bbox.x1),
+            y1: first.bbox.y1.max(second.bbox.y1),
+        },
+        raw_bbox: None,
+        font_size: average_optional(first.font_size, second.font_size),
+        bold: match (first.bold, second.bold) {
+            (Some(true), Some(true)) => Some(true),
+            (Some(false), Some(false)) => Some(false),
+            _ => None,
+        },
+        ocr_confidence: average_optional(first.ocr_confidence, second.ocr_confidence),
+        line_index: first.line_index,
+    })
+}
+
+fn two_lines_have_title_geometry(first: &LayoutBlock, second: &LayoutBlock) -> bool {
+    let first_mid_y = (first.bbox.y0 + first.bbox.y1) / 2.0;
+    let second_mid_y = (second.bbox.y0 + second.bbox.y1) / 2.0;
+    if second_mid_y <= first_mid_y {
+        return false;
+    }
+
+    let first_height = (first.bbox.y1 - first.bbox.y0).max(0.01);
+    let second_height = (second.bbox.y1 - second.bbox.y0).max(0.01);
+    let line_gap = second.bbox.y0 - first.bbox.y1;
+    if line_gap < -first_height.max(second_height) * 0.25
+        || line_gap > first_height.max(second_height) * 1.3
+    {
+        return false;
+    }
+
+    let first_width = first.bbox.x1 - first.bbox.x0;
+    let second_width = second.bbox.x1 - second.bbox.x0;
+    if first_width < 0.18 || second_width < 0.18 {
+        return false;
+    }
+
+    let first_x_mid = (first.bbox.x0 + first.bbox.x1) / 2.0;
+    let second_x_mid = (second.bbox.x0 + second.bbox.x1) / 2.0;
+    let centered_together = (first_x_mid - 0.5).abs() <= 0.16 && (second_x_mid - 0.5).abs() <= 0.16;
+    let aligned_left = (first.bbox.x0 - second.bbox.x0).abs() <= 0.08;
+    let aligned_right = (first.bbox.x1 - second.bbox.x1).abs() <= 0.08;
+    if !centered_together && !(aligned_left || aligned_right) {
+        return false;
+    }
+
+    match (first.font_size, second.font_size) {
+        (Some(first_size), Some(second_size)) if (first_size - second_size).abs() > 2.0 => {
+            return false;
+        }
+        _ => {}
+    }
+
+    true
+}
+
+fn average_optional(first: Option<f32>, second: Option<f32>) -> Option<f32> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some((first + second) / 2.0),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
 fn score_layout_block(
     block: &LayoutBlock,
     page_index: usize,
@@ -61,7 +200,7 @@ fn score_layout_block(
     profile: &ScoringProfile,
 ) -> Option<CandidateTitle> {
     let text = clean_candidate_text(&block.text);
-    if text.is_empty() {
+    if text.is_empty() || is_symbol_only_noise(&text) {
         return None;
     }
 
@@ -75,7 +214,8 @@ fn score_layout_block(
 
     apply_text_quality_rules(&mut context);
     apply_layout_rules(&mut context, block, profile);
-    apply_position_rules(&mut context, block, profile);
+    apply_position_rules(&mut context, block, page_index, profile);
+    apply_line_shape_rules(&mut context, block, page_index);
     apply_keyword_rules(&mut context, profile);
 
     if matches!(source, CandidateSource::OcrBlock) {
@@ -88,7 +228,7 @@ fn score_layout_block(
 
 fn score_paragraph(paragraph: &ParagraphBlock, profile: &ScoringProfile) -> Option<CandidateTitle> {
     let text = clean_candidate_text(&paragraph.text);
-    if text.is_empty() {
+    if text.is_empty() || is_symbol_only_noise(&text) {
         return None;
     }
 
@@ -183,6 +323,44 @@ fn clean_candidate_text(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+fn is_symbol_only_noise(text: &str) -> bool {
+    let visible_chars = text.chars().filter(|ch| !ch.is_whitespace()).count();
+    if visible_chars == 0 {
+        return true;
+    }
+
+    let alphabetic_chars = text.chars().filter(|ch| ch.is_alphabetic()).count();
+    let numeric_chars = text.chars().filter(|ch| ch.is_numeric()).count();
+    if alphabetic_chars > 0 || numeric_chars > 1 {
+        return false;
+    }
+
+    let symbol_chars = text
+        .chars()
+        .filter(|ch| {
+            matches!(
+                *ch,
+                '@' | '+'
+                    | '-'
+                    | '_'
+                    | '='
+                    | '*'
+                    | '#'
+                    | '□'
+                    | '■'
+                    | '▪'
+                    | '▬'
+                    | '▁'
+                    | '·'
+                    | '•'
+                    | '\u{fffd}'
+            ) || ch.is_ascii_punctuation()
+        })
+        .count();
+
+    symbol_chars == visible_chars
+}
+
 fn apply_text_quality_rules(context: &mut ScoreContext) {
     let char_count = context.text.chars().count();
     if (2..=40).contains(&char_count) {
@@ -213,6 +391,24 @@ fn apply_text_quality_rules(context: &mut ScoreContext) {
             "penalty",
             -60,
             "疑似页码、日期、密级或落款",
+        );
+    }
+
+    if looks_like_spaced_ocr_fragment(&context.text) {
+        context.add_rule(
+            "spaced-ocr-fragment",
+            "penalty",
+            -35,
+            "疑似 OCR 拆散的短词噪声",
+        );
+    }
+
+    if looks_like_letterhead_or_reference_number(&context.text) {
+        context.add_rule(
+            "letterhead-reference-noise",
+            "penalty",
+            -34,
+            "疑似红头机关名或发文字号",
         );
     }
 
@@ -260,7 +456,12 @@ fn apply_layout_rules(context: &mut ScoreContext, block: &LayoutBlock, profile: 
     }
 }
 
-fn apply_position_rules(context: &mut ScoreContext, block: &LayoutBlock, profile: &ScoringProfile) {
+fn apply_position_rules(
+    context: &mut ScoreContext,
+    block: &LayoutBlock,
+    page_index: usize,
+    profile: &ScoringProfile,
+) {
     let y_mid = (block.bbox.y0 + block.bbox.y1) / 2.0;
     if y_mid <= 0.25 {
         context.add_rule(
@@ -279,12 +480,48 @@ fn apply_position_rules(context: &mut ScoreContext, block: &LayoutBlock, profile
     }
 
     let x_mid = (block.bbox.x0 + block.bbox.x1) / 2.0;
-    if (x_mid - 0.5).abs() <= 0.12 {
+    let centered = (x_mid - 0.5).abs() <= 0.12;
+    if centered {
         context.add_rule(
             "position-centered",
             "position",
             scaled(12, profile.position_sensitivity),
             "接近水平中轴",
+        );
+    }
+
+    if page_index == 0 {
+        if centered && (0.40..=0.62).contains(&y_mid) {
+            context.add_rule(
+                "position-first-page-centered-title-band",
+                "position",
+                16,
+                "位于第一页居中标题带",
+            );
+        }
+    } else {
+        context.add_rule(
+            "position-later-page",
+            "penalty",
+            -14,
+            "后续页面候选保守降权",
+        );
+    }
+}
+
+fn apply_line_shape_rules(context: &mut ScoreContext, block: &LayoutBlock, page_index: usize) {
+    let width = block.bbox.x1 - block.bbox.x0;
+    let char_count = context.text.chars().count();
+    if width >= 0.60 && char_count >= 24 {
+        context.add_rule("wide-body-line", "penalty", -20, "疑似正文整行");
+    }
+
+    if page_index == 0 && looks_like_promulgation_sentence(&context.text) {
+        context.add_rule(
+            "promulgation-sentence",
+            "penalty",
+            -22,
+            "疑似法规公布说明句",
         );
     }
 }
@@ -341,6 +578,19 @@ fn apply_keyword_rules(context: &mut ScoreContext, profile: &ScoringProfile) {
             }
         }
     }
+
+    if looks_like_document_title(&context.text) {
+        context.add_rule(
+            "title-keyword-default",
+            "keyword",
+            10,
+            "命中文档标题类关键词",
+        );
+    }
+
+    if looks_like_notice_title_topic(&context.text) {
+        context.add_rule("notice-title-topic", "keyword", 16, "疑似通知标题主题");
+    }
 }
 
 fn scaled(delta: i16, sensitivity: f32) -> i16 {
@@ -349,9 +599,14 @@ fn scaled(delta: i16, sensitivity: f32) -> i16 {
 
 fn looks_like_sentence(text: &str) -> bool {
     text.chars().count() > 32
-        && ["，", "。", "；", ",", ".", ";"]
+        && ["，", "。", "；", ",", ".", ";", "已经", "现予", "施行"]
             .iter()
             .any(|mark| text.contains(mark))
+}
+
+fn looks_like_promulgation_sentence(text: &str) -> bool {
+    (text.contains("已经") || text.contains("现予") || text.contains("施行"))
+        && (text.contains("国务院") || text.contains("会议") || text.contains("公布"))
 }
 
 fn looks_like_noise(text: &str) -> bool {
@@ -363,14 +618,75 @@ fn looks_like_noise(text: &str) -> bool {
     let date_like = Regex::new(r"^\d{4}年\d{1,2}月\d{1,2}日$").unwrap();
     let page_like = Regex::new(r"^第\s*\d+\s*页$|^\d+\s*/\s*\d+$|^-\s*\d+\s*-$").unwrap();
     let numbered_like = Regex::new(r"^[一二三四五六七八九十]+[、.．]").unwrap();
+    let digits_only = Regex::new(r"^\d+$").unwrap();
+    let document_number_like = Regex::new(r"^第\s*\d+\s*号$").unwrap();
 
     date_like.is_match(trimmed)
         || page_like.is_match(trimmed)
         || numbered_like.is_match(trimmed)
+        || digits_only.is_match(trimmed)
+        || document_number_like.is_match(trimmed)
+        || trimmed.ends_with("国务院令")
         || trimmed.contains("机密")
         || trimmed.contains("秘密")
         || trimmed.ends_with("公司")
         || trimmed.ends_with("办公室")
+}
+
+fn looks_like_spaced_ocr_fragment(text: &str) -> bool {
+    let trimmed = text.trim();
+    let chars = trimmed.chars().collect::<Vec<_>>();
+    let non_space_count = chars.iter().filter(|ch| !ch.is_whitespace()).count();
+    let space_count = chars.iter().filter(|ch| ch.is_whitespace()).count();
+
+    non_space_count <= 4 && space_count >= 2
+}
+
+fn looks_like_letterhead_or_reference_number(text: &str) -> bool {
+    let trimmed = text.trim();
+    let compact = trimmed.split_whitespace().collect::<String>();
+    let reference_number_like =
+        Regex::new(r"^[\p{Han}]{1,8}\s*[\[〔（(]?\s*\d{4}\s*[\]〕）)]?\s*\d+\s*号?$").unwrap();
+
+    compact.ends_with("办公厅")
+        || compact.ends_with("办公室")
+        || compact.ends_with("生态环境部")
+        || compact.ends_with("生态环境厅")
+        || compact.ends_with("生态环境局")
+        || compact.ends_with("国务院")
+        || compact.contains("生态环境部办公")
+        || compact.contains("生态环境厅办公")
+        || compact.contains("生态环境局办公")
+        || reference_number_like.is_match(trimmed)
+}
+
+fn looks_like_document_title(text: &str) -> bool {
+    let trimmed = text.trim();
+    [
+        "条例", "办法", "规定", "决定", "公告", "通告", "意见", "细则", "章程", "规划", "计划",
+        "总结", "纪要",
+    ]
+    .iter()
+    .any(|keyword| trimmed.contains(keyword))
+}
+
+fn looks_like_notice_title_topic(text: &str) -> bool {
+    let trimmed = text.trim();
+    let contains_notice_word = trimmed.contains("通知");
+    let contains_topic_word = [
+        "关于",
+        "推进",
+        "统筹",
+        "工作",
+        "有关事项",
+        "监管",
+        "保护",
+        "生态",
+    ]
+    .iter()
+    .any(|keyword| trimmed.contains(keyword));
+
+    contains_notice_word && contains_topic_word
 }
 
 fn is_punctuation(ch: char) -> bool {
@@ -431,6 +747,51 @@ mod tests {
     }
 
     #[test]
+    fn combines_adjacent_pdf_title_lines_into_one_candidate() {
+        let result = score_document(
+            pdf_document(vec![
+                block(
+                    "关于统筹推进自然保护地和生态保护红线",
+                    0.18,
+                    0.12,
+                    0.82,
+                    0.16,
+                    Some(16.0),
+                    Some(false),
+                ),
+                block(
+                    "生态环境监管工作的通知",
+                    0.30,
+                    0.17,
+                    0.70,
+                    0.21,
+                    Some(16.0),
+                    Some(false),
+                ),
+                block(
+                    "各单位要结合实际认真组织实施。",
+                    0.12,
+                    0.34,
+                    0.88,
+                    0.38,
+                    Some(11.0),
+                    Some(false),
+                ),
+            ]),
+            ScoringProfile::default(),
+        );
+
+        assert_eq!(
+            result.final_title.as_deref(),
+            Some("关于统筹推进自然保护地和生态保护红线生态环境监管工作的通知")
+        );
+        assert!(result.candidates[0]
+            .rule_details
+            .iter()
+            .any(|rule| rule.rule_name == "layout-two-line-title"));
+    }
+
+    #[test]
     fn scores_image_ocr_title_but_applies_ocr_conservatism() {
         let profile = ScoringProfile {
             ocr_conservatism: 1.5,
@@ -473,6 +834,210 @@ mod tests {
             .rule_details
             .iter()
             .any(|rule| rule.rule_name == "ocr-conservatism"));
+    }
+
+    #[test]
+    fn combines_adjacent_ocr_title_lines_into_one_candidate() {
+        let result = score_document(
+            ExtractedDocument {
+                source_type: FileType::Pdf,
+                extract_method: ExtractMethod::PdfOcrFallbackTesseract,
+                pages: vec![ExtractedPage {
+                    page_index: 0,
+                    width: 1200.0,
+                    height: 1600.0,
+                    unit: SourceUnit::Pixel,
+                    blocks: vec![
+                        ocr_block(
+                            "关于统筹推进自然保护地和生态保护红线",
+                            0.18,
+                            0.32,
+                            0.82,
+                            0.36,
+                            0.88,
+                        ),
+                        ocr_block("生态环境监管有关事项的通知", 0.27, 0.37, 0.73, 0.41, 0.88),
+                    ],
+                }],
+                paragraphs: vec![],
+                diagnostics_ref: None,
+            },
+            ScoringProfile::default(),
+        );
+
+        assert_eq!(
+            result.final_title.as_deref(),
+            Some("关于统筹推进自然保护地和生态保护红线生态环境监管有关事项的通知")
+        );
+        assert_eq!(result.candidates[0].source, CandidateSource::OcrBlock);
+        assert!(result.candidates[0]
+            .rule_details
+            .iter()
+            .any(|rule| rule.rule_name == "layout-two-line-title"));
+    }
+
+    #[test]
+    fn rejects_isolated_numeric_ocr_line_as_title() {
+        let result = score_document(
+            ExtractedDocument {
+                source_type: FileType::Pdf,
+                extract_method: ExtractMethod::PdfOcrFallbackTesseract,
+                pages: vec![ExtractedPage {
+                    page_index: 0,
+                    width: 1200.0,
+                    height: 1600.0,
+                    unit: SourceUnit::Pixel,
+                    blocks: vec![
+                        ocr_block("830", 0.48, 0.18, 0.52, 0.21, 0.90),
+                        ocr_block("中华人民共和国自然保护区条例", 0.25, 0.50, 0.78, 0.55, 0.88),
+                    ],
+                }],
+                paragraphs: vec![],
+                diagnostics_ref: None,
+            },
+            ScoringProfile::default(),
+        );
+
+        assert_eq!(
+            result.final_title.as_deref(),
+            Some("中华人民共和国自然保护区条例")
+        );
+        assert_ne!(result.candidates[0].text, "830");
+        assert!(result
+            .candidates
+            .iter()
+            .find(|candidate| candidate.text == "830")
+            .is_none_or(|candidate| candidate.score < 45));
+    }
+
+    #[test]
+    fn government_order_header_does_not_beat_regulation_title() {
+        let result = score_document(
+            ExtractedDocument {
+                source_type: FileType::Pdf,
+                extract_method: ExtractMethod::PdfOcrFallbackTesseract,
+                pages: vec![ExtractedPage {
+                    page_index: 0,
+                    width: 1200.0,
+                    height: 1600.0,
+                    unit: SourceUnit::Pixel,
+                    blocks: vec![
+                        ocr_block("中华人民共和国国务院令", 0.30, 0.18, 0.70, 0.23, 0.90),
+                        ocr_block("第830号", 0.46, 0.24, 0.54, 0.27, 0.90),
+                        ocr_block("中华人民共和国自然保护区条例", 0.25, 0.50, 0.78, 0.55, 0.88),
+                    ],
+                }],
+                paragraphs: vec![],
+                diagnostics_ref: None,
+            },
+            ScoringProfile::default(),
+        );
+
+        assert_eq!(
+            result.final_title.as_deref(),
+            Some("中华人民共和国自然保护区条例")
+        );
+        assert_eq!(result.candidates[0].text, "中华人民共和国自然保护区条例");
+    }
+
+    #[test]
+    fn first_page_centered_title_beats_body_lines_on_later_pages() {
+        let result = score_document(
+            ExtractedDocument {
+                source_type: FileType::Pdf,
+                extract_method: ExtractMethod::PdfOcrFallbackTesseract,
+                pages: vec![
+                    ExtractedPage {
+                        page_index: 0,
+                        width: 1200.0,
+                        height: 1600.0,
+                        unit: SourceUnit::Pixel,
+                        blocks: vec![
+                            ocr_block(
+                                "《中华人民共和国自然保护区条例》已经2026年1月9日国务院",
+                                0.207,
+                                0.278,
+                                0.855,
+                                0.293,
+                                0.93,
+                            ),
+                            ocr_block(
+                                "中华人民共和国自然保护区条例",
+                                0.260,
+                                0.482,
+                                0.742,
+                                0.505,
+                                0.93,
+                            ),
+                        ],
+                    },
+                    ExtractedPage {
+                        page_index: 2,
+                        width: 1200.0,
+                        height: 1600.0,
+                        unit: SourceUnit::Pixel,
+                        blocks: vec![ocr_block(
+                            "按照规定设立的各自然保护区管理机构依照本条例和规定的职",
+                            0.195,
+                            0.181,
+                            0.853,
+                            0.197,
+                            0.94,
+                        )],
+                    },
+                ],
+                paragraphs: vec![],
+                diagnostics_ref: None,
+            },
+            ScoringProfile::default(),
+        );
+
+        assert_eq!(
+            result.final_title.as_deref(),
+            Some("中华人民共和国自然保护区条例")
+        );
+        assert_eq!(result.candidates[0].text, "中华人民共和国自然保护区条例");
+    }
+
+    #[test]
+    fn ministry_red_header_and_reference_number_do_not_beat_notice_title_topic() {
+        let result = score_document(
+            ExtractedDocument {
+                source_type: FileType::Pdf,
+                extract_method: ExtractMethod::PdfOcrFallbackTesseract,
+                pages: vec![ExtractedPage {
+                    page_index: 0,
+                    width: 1200.0,
+                    height: 1600.0,
+                    unit: SourceUnit::Pixel,
+                    blocks: vec![
+                        ocr_block("人 自 人", 0.39, 0.10, 0.61, 0.14, 0.73),
+                        ocr_block("民共和国生态环境部办公打", 0.24, 0.15, 0.76, 0.19, 0.68),
+                        ocr_block("环办生态函 [2024] 311", 0.56, 0.19, 0.86, 0.22, 0.59),
+                        ocr_block(
+                            "进自然保护地和生态保护红线生态环境监管有关事项通知如下",
+                            0.18,
+                            0.33,
+                            0.84,
+                            0.37,
+                            0.88,
+                        ),
+                    ],
+                }],
+                paragraphs: vec![],
+                diagnostics_ref: None,
+            },
+            ScoringProfile::default(),
+        );
+
+        assert_eq!(
+            result.final_title.as_deref(),
+            Some("进自然保护地和生态保护红线生态环境监管有关事项通知如下")
+        );
+        assert_eq!(
+            result.candidates[0].text,
+            "进自然保护地和生态保护红线生态环境监管有关事项通知如下"
+        );
     }
 
     #[test]
@@ -539,6 +1104,24 @@ mod tests {
             .candidates
             .iter()
             .all(|candidate| candidate.score < 70));
+    }
+
+    #[test]
+    fn filters_symbol_only_layout_blocks() {
+        let result = score_document(
+            pdf_document(vec![
+                block("@", 0.48, 0.10, 0.52, 0.14, Some(22.0), Some(false)),
+                block("□", 0.48, 0.16, 0.52, 0.20, Some(18.0), Some(false)),
+                block("+", 0.48, 0.22, 0.52, 0.26, Some(18.0), Some(false)),
+                block("▬", 0.48, 0.28, 0.52, 0.32, Some(18.0), Some(false)),
+                block("·", 0.48, 0.34, 0.52, 0.38, Some(18.0), Some(false)),
+            ]),
+            ScoringProfile::default(),
+        );
+
+        assert!(result.candidates.is_empty());
+        assert!(result.final_title.is_none());
+        assert_eq!(result.decision, crate::models::ScoreDecision::Failed);
     }
 
     #[test]
@@ -637,6 +1220,23 @@ mod tests {
             font_size,
             bold,
             ocr_confidence: None,
+            line_index: Some(0),
+        }
+    }
+
+    fn ocr_block(text: &str, x0: f32, y0: f32, x1: f32, y1: f32, confidence: f32) -> LayoutBlock {
+        LayoutBlock {
+            text: text.into(),
+            bbox: NormalizedBox { x0, y0, x1, y1 },
+            raw_bbox: Some(RawBox {
+                x0: x0 * 1200.0,
+                y0: y0 * 1600.0,
+                x1: x1 * 1200.0,
+                y1: y1 * 1600.0,
+            }),
+            font_size: None,
+            bold: None,
+            ocr_confidence: Some(confidence),
             line_index: Some(0),
         }
     }

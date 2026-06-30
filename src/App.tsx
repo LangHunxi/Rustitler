@@ -42,15 +42,6 @@ const fileTypeLabel = {
   unsupported: "不支持",
 };
 
-const stageLabel: Record<string, string> = {
-  ingest: "扫描输入",
-  extract: "提取内容",
-  score: "标题评分",
-  rename: "创建输出",
-  history: "写入历史",
-  undo: "撤销输出",
-};
-
 const summaryText = (summary?: BatchSummary) => {
   if (!summary) {
     return "0 个文件";
@@ -63,6 +54,13 @@ const errorText = (error: AppErrorView | string | undefined) => {
     return "";
   }
   return typeof error === "string" ? error : error.userMessage;
+};
+
+const fileOutcomeText = (file: FileUiState) => {
+  if (file.outputPath) return file.outputPath;
+  if (file.failureReason) return file.failureReason;
+  if (file.duplicateWarning) return "疑似重复";
+  return "—";
 };
 
 const unknownErrorText = (error: unknown) => {
@@ -272,8 +270,8 @@ function QueueView({
               </span>
               <span>{file.recognizedTitle ?? "—"}</span>
               <span>{file.confidence != null ? `${file.confidence}%` : "—"}</span>
-              <span title={file.outputPath ?? file.failureReason ?? ""}>
-                {file.outputPath ?? file.failureReason ?? "—"}
+              <span title={file.outputPath ?? file.failureReason ?? file.duplicateWarning ?? ""}>
+                {fileOutcomeText(file)}
               </span>
             </button>
           ))}
@@ -304,6 +302,7 @@ function FileDetail({ file }: { file?: FileUiState }) {
   }
 
   const candidates = file.scoringResult?.candidates ?? [];
+  const visibleCandidates = candidates.slice(0, 5);
   const extension = fileExtension(file.fileName);
 
   return (
@@ -323,21 +322,6 @@ function FileDetail({ file }: { file?: FileUiState }) {
         <div>
           <dt>置信度</dt>
           <dd>{file.confidence != null ? `${file.confidence}%` : "—"}</dd>
-        </div>
-        <div>
-          <dt>输出路径</dt>
-          <dd>{file.outputPath ?? "—"}</dd>
-        </div>
-        <div>
-          <dt>失败原因</dt>
-          <dd>{file.failureReason ?? file.error?.technicalDetail ?? "—"}</dd>
-        </div>
-        <div>
-          <dt>处理日志</dt>
-          <dd>
-            {file.progressStage ? stageLabel[file.progressStage] ?? file.progressStage : "—"}
-            {file.extractMethod ? ` · ${file.extractMethod}` : ""}
-          </dd>
         </div>
       </dl>
 
@@ -365,12 +349,19 @@ function FileDetail({ file }: { file?: FileUiState }) {
       <section>
         <h3>候选标题</h3>
         <div className="candidate-list">
-          {candidates.map((candidate) => (
-            <details key={`${candidate.source}-${candidate.text}-${candidate.score}`} open>
+          {visibleCandidates.map((candidate) => (
+            <details key={`${candidate.source}-${candidate.text}-${candidate.score}`}>
               <summary>
                 <span>{candidate.text}</span>
                 <strong>{candidate.score}%</strong>
               </summary>
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => void batchStore.selectCandidateTitle(file.fileJobId, candidate.text)}
+              >
+                使用
+              </button>
               <div className="score-grid">
                 <span>版式 {candidate.categoryScores.layout}</span>
                 <span>位置 {candidate.categoryScores.position}</span>

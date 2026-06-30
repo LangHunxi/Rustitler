@@ -32,6 +32,7 @@ fn main() {
             rustitler_lib::commands::cancel_batch,
             rustitler_lib::commands::get_batch_state,
             rustitler_lib::commands::confirm_pending_output,
+            rustitler_lib::commands::select_candidate_title,
             rustitler_lib::commands::undo_batch,
             rustitler_lib::commands::list_history,
             rustitler_lib::commands::get_history_batch,

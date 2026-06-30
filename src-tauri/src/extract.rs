@@ -543,10 +543,50 @@ fn first_ten_non_empty_paragraphs(raw_paragraphs: Vec<String>) -> Vec<ParagraphB
 }
 
 fn pages_have_text(pages: &[RawPdfPage]) -> bool {
-    pages
+    let text = pages
         .iter()
         .flat_map(|page| &page.blocks)
-        .any(|block| !block.text.trim().is_empty())
+        .map(|block| block.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    native_pdf_text_is_usable(&text)
+}
+
+fn native_pdf_text_is_usable(text: &str) -> bool {
+    let visible_chars = text.chars().filter(|ch| !ch.is_whitespace()).count();
+    if visible_chars == 0 || looks_like_pdf_encoding_leak(text) {
+        return false;
+    }
+
+    let alphabetic_chars = text.chars().filter(|ch| ch.is_alphabetic()).count();
+    if alphabetic_chars < 2 {
+        return false;
+    }
+
+    let alphanumeric_chars = text.chars().filter(|ch| ch.is_alphanumeric()).count();
+    let obvious_noise_chars = text
+        .chars()
+        .filter(|ch| matches!(*ch, '\u{fffd}' | '□'))
+        .count();
+    let alphanumeric_ratio = alphanumeric_chars as f32 / visible_chars as f32;
+    let obvious_noise_ratio = obvious_noise_chars as f32 / visible_chars as f32;
+
+    alphanumeric_ratio >= 0.35 && obvious_noise_ratio <= 0.20
+}
+
+fn looks_like_pdf_encoding_leak(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    if lower.contains("(cid:") || lower.contains("/i255") {
+        return true;
+    }
+
+    let visible_chars = text.chars().filter(|ch| !ch.is_whitespace()).count();
+    if visible_chars == 0 {
+        return false;
+    }
+
+    let slash_count = text.chars().filter(|ch| *ch == '/').count();
+    slash_count >= 3 && slash_count as f32 / visible_chars as f32 >= 0.20
 }
 
 fn pdf_page_from_raw(page: RawPdfPage) -> ExtractedPage {
@@ -603,7 +643,7 @@ fn extracted_page_from_ocr(page: OcrPage) -> ExtractedPage {
         width: page.width as f32,
         height: page.height as f32,
         unit: SourceUnit::Pixel,
-        blocks: page.blocks,
+        blocks: merge_ocr_blocks_into_lines(page.blocks),
     }
 }
 
@@ -625,7 +665,7 @@ fn extract_tesseract_page(
     let api = tesseract_rs::TesseractAPI::new();
     api.init(tessdata_dir, language)
         .map_err(|err| adapter_error(&page.image_path, err))?;
-    api.set_page_seg_mode(tesseract_rs::TessPageSegMode::PSM_SPARSE_TEXT)
+    api.set_page_seg_mode(tesseract_page_seg_mode())
         .map_err(|err| adapter_error(&page.image_path, err))?;
     api.set_image(
         &image_data,
@@ -635,6 +675,7 @@ fn extract_tesseract_page(
         bytes_per_line,
     )
     .map_err(|err| adapter_error(&page.image_path, err))?;
+    let _ = api.set_source_resolution(estimate_source_resolution(page, width, height));
     api.recognize()
         .map_err(|err| adapter_error(&page.image_path, err))?;
 
@@ -649,7 +690,77 @@ fn extract_tesseract_page(
 }
 
 #[cfg(feature = "extraction-ocr")]
+fn tesseract_page_seg_mode() -> tesseract_rs::TessPageSegMode {
+    tesseract_rs::TessPageSegMode::PSM_AUTO
+}
+
+#[cfg(feature = "extraction-ocr")]
+fn estimate_source_resolution(page: &OcrPageInput, image_width: u32, image_height: u32) -> i32 {
+    if page.width > 0 && page.height > 0 {
+        let width_dpi = image_width as f32 / page.width as f32 * 72.0;
+        let height_dpi = image_height as f32 / page.height as f32 * 72.0;
+        return ((width_dpi + height_dpi) / 2.0).round().clamp(72.0, 600.0) as i32;
+    }
+
+    150
+}
+
+#[cfg(feature = "extraction-ocr")]
 fn collect_tesseract_blocks(
+    api: &tesseract_rs::TesseractAPI,
+    width: u32,
+    height: u32,
+    path: &Path,
+) -> Result<Vec<LayoutBlock>, AppError> {
+    let iterator = match api.get_iterator() {
+        Ok(iterator) => iterator,
+        Err(_) => return Ok(vec![]),
+    };
+    let mut blocks = vec![];
+
+    loop {
+        let level = tesseract_rs::TessPageIteratorLevel::RIL_TEXTLINE;
+        match (
+            iterator.get_utf8_text(level),
+            iterator.get_bounding_box(level),
+            iterator.confidence(level),
+        ) {
+            (Ok(text), Ok((left, top, right, bottom)), Ok(confidence))
+                if !text.trim().is_empty() =>
+            {
+                let raw_bbox = RawBox {
+                    x0: left as f32,
+                    y0: top as f32,
+                    x1: right as f32,
+                    y1: bottom as f32,
+                };
+                blocks.push(LayoutBlock {
+                    text: clean_ocr_line_text(&text),
+                    bbox: normalize_box(&raw_bbox, width as f32, height as f32),
+                    raw_bbox: Some(raw_bbox),
+                    font_size: None,
+                    bold: None,
+                    ocr_confidence: Some(confidence),
+                    line_index: Some(blocks.len()),
+                });
+            }
+            (Ok(_), Ok(_), Ok(_)) => {}
+            _ => return collect_tesseract_word_blocks(api, width, height, path),
+        }
+
+        if !iterator
+            .next(level)
+            .map_err(|err| adapter_error(path, err))?
+        {
+            break;
+        }
+    }
+
+    Ok(blocks)
+}
+
+#[cfg(feature = "extraction-ocr")]
+fn collect_tesseract_word_blocks(
     api: &tesseract_rs::TesseractAPI,
     width: u32,
     height: u32,
@@ -695,6 +806,155 @@ fn collect_tesseract_blocks(
     }
 
     Ok(blocks)
+}
+
+fn merge_ocr_blocks_into_lines(blocks: Vec<LayoutBlock>) -> Vec<LayoutBlock> {
+    let mut blocks = blocks
+        .into_iter()
+        .filter(|block| !block.text.trim().is_empty())
+        .collect::<Vec<_>>();
+    blocks.sort_by(|a, b| {
+        a.bbox
+            .y0
+            .total_cmp(&b.bbox.y0)
+            .then_with(|| a.bbox.x0.total_cmp(&b.bbox.x0))
+    });
+
+    let mut rows: Vec<Vec<LayoutBlock>> = vec![];
+    for block in blocks {
+        if let Some(row) = rows.iter_mut().find(|row| {
+            row.first()
+                .is_some_and(|first| same_ocr_line(first, &block))
+        }) {
+            row.push(block);
+        } else {
+            rows.push(vec![block]);
+        }
+    }
+
+    let mut merged = vec![];
+    for (row_index, mut row) in rows.into_iter().enumerate() {
+        row.sort_by(|a, b| a.bbox.x0.total_cmp(&b.bbox.x0));
+
+        let mut segment: Vec<LayoutBlock> = vec![];
+        let mut segment_right = 0.0;
+        for block in row {
+            let gap = block.bbox.x0 - segment_right;
+            if !segment.is_empty() && gap > 0.08 {
+                merged.push(merge_ocr_line_segment(
+                    std::mem::take(&mut segment),
+                    merged.len().max(row_index),
+                ));
+            }
+            segment_right = segment_right.max(block.bbox.x1);
+            segment.push(block);
+        }
+
+        if !segment.is_empty() {
+            merged.push(merge_ocr_line_segment(segment, merged.len().max(row_index)));
+        }
+    }
+
+    merged.sort_by(|a, b| {
+        a.bbox
+            .y0
+            .total_cmp(&b.bbox.y0)
+            .then_with(|| a.bbox.x0.total_cmp(&b.bbox.x0))
+    });
+    for (line_index, block) in merged.iter_mut().enumerate() {
+        block.line_index = Some(line_index);
+    }
+    merged
+}
+
+fn same_ocr_line(a: &LayoutBlock, b: &LayoutBlock) -> bool {
+    let a_mid = (a.bbox.y0 + a.bbox.y1) / 2.0;
+    let b_mid = (b.bbox.y0 + b.bbox.y1) / 2.0;
+    let a_height = (a.bbox.y1 - a.bbox.y0).max(0.01);
+    let b_height = (b.bbox.y1 - b.bbox.y0).max(0.01);
+    (a_mid - b_mid).abs() <= a_height.max(b_height) * 0.6
+        || vertical_overlap_ratio(&a.bbox, &b.bbox) >= 0.55
+}
+
+fn vertical_overlap_ratio(a: &NormalizedBox, b: &NormalizedBox) -> f32 {
+    let overlap = a.y1.min(b.y1) - a.y0.max(b.y0);
+    if overlap <= 0.0 {
+        return 0.0;
+    }
+
+    let shorter = (a.y1 - a.y0).min(b.y1 - b.y0).max(0.01);
+    overlap / shorter
+}
+
+fn merge_ocr_line_segment(blocks: Vec<LayoutBlock>, line_index: usize) -> LayoutBlock {
+    let mut text = String::new();
+    let mut confidence_sum = 0.0;
+    let mut confidence_count = 0;
+    let mut raw_bbox: Option<RawBox> = None;
+    let mut bbox = NormalizedBox {
+        x0: 1.0,
+        y0: 1.0,
+        x1: 0.0,
+        y1: 0.0,
+    };
+
+    for block in blocks {
+        push_ocr_text(&mut text, block.text.trim());
+        if let Some(confidence) = block.ocr_confidence {
+            confidence_sum += confidence;
+            confidence_count += 1;
+        }
+        bbox.x0 = bbox.x0.min(block.bbox.x0);
+        bbox.y0 = bbox.y0.min(block.bbox.y0);
+        bbox.x1 = bbox.x1.max(block.bbox.x1);
+        bbox.y1 = bbox.y1.max(block.bbox.y1);
+        raw_bbox = merge_raw_boxes(raw_bbox, block.raw_bbox);
+    }
+
+    LayoutBlock {
+        text,
+        bbox,
+        raw_bbox,
+        font_size: None,
+        bold: None,
+        ocr_confidence: (confidence_count > 0).then_some(confidence_sum / confidence_count as f32),
+        line_index: Some(line_index),
+    }
+}
+
+fn push_ocr_text(target: &mut String, next: &str) {
+    if next.is_empty() {
+        return;
+    }
+    if target.is_empty() {
+        target.push_str(next);
+        return;
+    }
+
+    let prev_char = target.chars().last().unwrap();
+    let next_char = next.chars().next().unwrap();
+    if prev_char.is_ascii_alphanumeric() && next_char.is_ascii_alphanumeric() {
+        target.push(' ');
+    }
+    target.push_str(next);
+}
+
+fn clean_ocr_line_text(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn merge_raw_boxes(current: Option<RawBox>, next: Option<RawBox>) -> Option<RawBox> {
+    match (current, next) {
+        (Some(current), Some(next)) => Some(RawBox {
+            x0: current.x0.min(next.x0),
+            y0: current.y0.min(next.y0),
+            x1: current.x1.max(next.x1),
+            y1: current.y1.max(next.y1),
+        }),
+        (Some(current), None) => Some(current),
+        (None, Some(next)) => Some(next),
+        (None, None) => None,
+    }
 }
 
 fn unsupported_format_error(path: &Path) -> AppError {
@@ -960,6 +1220,71 @@ mod tests {
     }
 
     #[test]
+    fn pdf_garbled_native_text_uses_ocr_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let image_path = dir.path().join("page-1.png");
+        let services = test_services()
+            .with_pdf_pages(vec![RawPdfPage {
+                page_index: 0,
+                width: 600.0,
+                height: 800.0,
+                blocks: vec![
+                    RawTextBlock {
+                        text: "@".into(),
+                        x: 260.0,
+                        y: 80.0,
+                        width: 20.0,
+                        height: 20.0,
+                        font_size: Some(20.0),
+                        bold: Some(false),
+                        confidence: None,
+                        line_index: Some(0),
+                    },
+                    RawTextBlock {
+                        text: "□ □ + ▬ ·".into(),
+                        x: 120.0,
+                        y: 140.0,
+                        width: 360.0,
+                        height: 20.0,
+                        font_size: Some(16.0),
+                        bold: Some(false),
+                        confidence: None,
+                        line_index: Some(1),
+                    },
+                ],
+            }])
+            .with_rasterized_pages(vec![RasterizedPage {
+                page_index: 0,
+                width: 1200,
+                height: 1600,
+                image_path: image_path.clone(),
+            }])
+            .with_ocr_pages(vec![OcrPage {
+                page_index: 0,
+                width: 1200,
+                height: 1600,
+                blocks: vec![ocr_block(
+                    "中华人民共和国自然保护区条例",
+                    0.2,
+                    0.1,
+                    0.8,
+                    0.16,
+                    88.0,
+                )],
+            }]);
+        let request = request(FileType::Pdf, dir.path().join("garbled.pdf"));
+
+        let doc = extract_document_with_services(&request, &services.refs(), dir.path()).unwrap();
+
+        assert_eq!(doc.extract_method, ExtractMethod::PdfOcrFallbackTesseract);
+        assert_eq!(doc.pages[0].blocks[0].text, "中华人民共和国自然保护区条例");
+        assert_eq!(
+            services.rasterizer.last_pages.borrow().as_slice(),
+            &[1, 2, 3]
+        );
+    }
+
+    #[test]
     fn image_uses_ocr_blocks() {
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("image.png");
@@ -981,6 +1306,37 @@ mod tests {
         assert_eq!(services.ocr.last_inputs.borrow()[0].image_path, source);
     }
 
+    #[test]
+    fn ocr_words_on_same_line_are_merged_into_title_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("image.png");
+        let services = test_services().with_ocr_pages(vec![OcrPage {
+            page_index: 0,
+            width: 1200,
+            height: 1600,
+            blocks: vec![
+                ocr_block("830", 0.48, 0.18, 0.52, 0.21, 90.0),
+                ocr_block("中华人民", 0.25, 0.50, 0.39, 0.55, 88.0),
+                ocr_block("共和国", 0.40, 0.50, 0.50, 0.55, 88.0),
+                ocr_block("自然", 0.51, 0.50, 0.58, 0.55, 88.0),
+                ocr_block("保护区", 0.59, 0.50, 0.70, 0.55, 88.0),
+                ocr_block("条例", 0.71, 0.50, 0.78, 0.55, 88.0),
+            ],
+        }]);
+        let request = request(FileType::Png, source);
+
+        let doc = extract_document_with_services(&request, &services.refs(), dir.path()).unwrap();
+
+        let texts = doc.pages[0]
+            .blocks
+            .iter()
+            .map(|block| block.text.as_str())
+            .collect::<Vec<_>>();
+        assert!(texts.contains(&"830"));
+        assert!(texts.contains(&"中华人民共和国自然保护区条例"));
+        assert!(!texts.contains(&"保护区"));
+    }
+
     #[cfg(feature = "extraction-ocr")]
     #[test]
     fn tesseract_ocr_extractor_uses_configured_tessdata_dir() {
@@ -988,6 +1344,15 @@ mod tests {
 
         assert_eq!(extractor.tessdata_dir(), Path::new("/bundle/tessdata"));
         assert_eq!(extractor.language(), "chi_sim");
+    }
+
+    #[cfg(feature = "extraction-ocr")]
+    #[test]
+    fn tesseract_ocr_uses_auto_page_segmentation_for_full_page_documents() {
+        assert_eq!(
+            tesseract_page_seg_mode(),
+            tesseract_rs::TessPageSegMode::PSM_AUTO
+        );
     }
 
     #[test]

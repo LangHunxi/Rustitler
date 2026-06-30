@@ -834,6 +834,9 @@ mod tests {
         services
             .extractor
             .insert("pending.docx", Ok(low_confidence_word_document()));
+        services
+            .extractor
+            .insert("duplicate.pdf", Ok(high_confidence_pdf_document()));
         services.history.mark_duplicate_path("duplicate.pdf");
         let scheduler = BatchScheduler::default();
 
@@ -853,8 +856,8 @@ mod tests {
         let events = services.events.events();
 
         assert_eq!(state.summary.total, 4);
-        assert_eq!(state.summary.output_created, 1);
-        assert_eq!(state.summary.pending, 2);
+        assert_eq!(state.summary.output_created, 2);
+        assert_eq!(state.summary.pending, 1);
         assert_eq!(state.summary.skipped, 1);
         assert_eq!(
             state
@@ -876,14 +879,31 @@ mod tests {
         );
         assert_eq!(
             sorted(services.extractor.calls()),
-            vec!["auto.pdf".to_string(), "pending.docx".to_string()]
+            vec![
+                "auto.pdf".to_string(),
+                "duplicate.pdf".to_string(),
+                "pending.docx".to_string()
+            ]
         );
         assert_eq!(history.file_results.len(), 4);
-        assert_eq!(history.undo_records.len(), 1);
+        assert_eq!(history.undo_records.len(), 2);
         assert!(history
             .file_results
             .iter()
             .any(|record| record.output_kind == Some(OutputKind::Auto)));
+        let duplicate_file = state
+            .files
+            .iter()
+            .find(|file| file.file_name == "duplicate.pdf")
+            .unwrap();
+        assert_eq!(duplicate_file.status, FileStatus::OutputCreated);
+        assert_eq!(duplicate_file.pending_reason, None);
+        assert_eq!(duplicate_file.failure_reason, None);
+        assert!(duplicate_file
+            .duplicate_warning
+            .as_deref()
+            .unwrap()
+            .contains("old-batch"));
         assert!(events
             .iter()
             .any(|event| matches!(event, BatchEvent::FileExtracted { .. })));
@@ -893,7 +913,7 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| matches!(event, BatchEvent::FileOutputCreated { .. })));
-        assert!(events.iter().any(|event| matches!(
+        assert!(!events.iter().any(|event| matches!(
             event,
             BatchEvent::FilePending {
                 reason: PendingReason::DuplicateSuspected,

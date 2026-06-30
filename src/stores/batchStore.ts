@@ -2,6 +2,7 @@ import {
   cancelBatch,
   confirmPendingOutput,
   getBatchState,
+  selectCandidateTitle,
   startBatch,
 } from "../api/commands";
 import type {
@@ -40,6 +41,7 @@ export interface BatchStore extends ObservableStore<BatchStoreState> {
   cancel: () => Promise<void>;
   refresh: () => Promise<void>;
   confirmPending: (fileJobId: FileJobId, editedNameStem: string) => Promise<FileJobView>;
+  selectCandidateTitle: (fileJobId: FileJobId, candidateText: string) => Promise<FileJobView>;
   selectFile: (fileJobId: FileJobId) => void;
   applyEvent: (event: BatchEvent) => void;
   replaceSnapshot: (snapshot: BatchState) => void;
@@ -147,12 +149,15 @@ export const createBatchStore = (): BatchStore => {
           };
         }
         case "FileProgress": {
-          const files = updateFile(state.files, event.fileJobId, (file) => ({
-            ...file,
-            status: "analyzing",
-            progressStage: event.stage,
-            progress: event.progress,
-          }));
+          const files = updateFile(state.files, event.fileJobId, (file) => {
+            const shouldMarkAnalyzing = file.status === "queued" || file.status === "analyzing";
+            return {
+              ...file,
+              status: shouldMarkAnalyzing ? "analyzing" : file.status,
+              progressStage: event.stage,
+              progress: event.progress,
+            };
+          });
           return { ...state, batch: state.batch ? { ...state.batch, files } : state.batch, files };
         }
         case "FileExtracted": {
@@ -291,6 +296,30 @@ export const createBatchStore = (): BatchStore => {
     return updated;
   };
 
+  const chooseCandidateTitle = async (fileJobId: FileJobId, candidateText: string) => {
+    const updated = await selectCandidateTitle(fileJobId, candidateText);
+    observable.updateState((state) => {
+      const files = updateFile(
+        state.files,
+        fileJobId,
+        (file) => ({
+          ...file,
+          ...updated,
+          scoringResult: file.scoringResult
+            ? {
+                ...file.scoringResult,
+                finalTitle: updated.recognizedTitle,
+                confidence: updated.confidence ?? file.scoringResult.confidence,
+              }
+            : file.scoringResult,
+        }),
+        () => updated,
+      );
+      return { ...state, batch: state.batch ? { ...state.batch, files } : state.batch, files };
+    });
+    return updated;
+  };
+
   const cancel = async () => {
     const batchId = observable.getState().batch?.batchId;
     if (!batchId) {
@@ -315,6 +344,7 @@ export const createBatchStore = (): BatchStore => {
     cancel,
     refresh,
     confirmPending,
+    selectCandidateTitle: chooseCandidateTitle,
     selectFile,
     applyEvent,
     replaceSnapshot,

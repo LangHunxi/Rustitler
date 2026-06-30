@@ -360,6 +360,7 @@ pub struct FileJobView {
     pub output_path: Option<String>,
     pub failure_reason: Option<String>,
     pub pending_reason: Option<PendingReason>,
+    pub duplicate_warning: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -378,6 +379,7 @@ pub struct FileJob {
     pub output_path: Option<String>,
     pub failure_reason: Option<String>,
     pub pending_reason: Option<PendingReason>,
+    pub duplicate_warning: Option<String>,
 }
 
 impl From<&FileJob> for FileJobView {
@@ -394,6 +396,7 @@ impl From<&FileJob> for FileJobView {
             output_path: job.output_path.clone(),
             failure_reason: job.failure_reason.clone(),
             pending_reason: job.pending_reason.clone(),
+            duplicate_warning: job.duplicate_warning.clone(),
         }
     }
 }
@@ -606,6 +609,9 @@ mod tests {
             output_path: None,
             failure_reason: None,
             pending_reason: None,
+            duplicate_warning: Some(
+                "疑似重复：历史批次 old-batch 的文件 old-file 已处理过。".into(),
+            ),
         };
 
         let value = serde_json::to_value(view).unwrap();
@@ -752,6 +758,7 @@ mod tests {
             output_path: Some("/input/Rustitler 输出/劳动合同.pdf".into()),
             failure_reason: None,
             pending_reason: None,
+            duplicate_warning: None,
         }
     }
 

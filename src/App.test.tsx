@@ -1,11 +1,13 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { fileView, scoringResult } from "./test/fixtures";
 
 const mocks = vi.hoisted(() => ({
   startBatch: vi.fn(),
   cancelBatch: vi.fn(),
   getBatchState: vi.fn(),
   confirmPendingOutput: vi.fn(),
+  selectCandidateTitle: vi.fn(),
   undoBatch: vi.fn(),
   listHistory: vi.fn(),
   getHistoryBatch: vi.fn(),
@@ -40,6 +42,7 @@ vi.mock("./api/commands", () => ({
   cancelBatch: mocks.cancelBatch,
   getBatchState: mocks.getBatchState,
   confirmPendingOutput: mocks.confirmPendingOutput,
+  selectCandidateTitle: mocks.selectCandidateTitle,
   undoBatch: mocks.undoBatch,
   listHistory: mocks.listHistory,
   getHistoryBatch: mocks.getHistoryBatch,
@@ -78,6 +81,7 @@ describe("App", () => {
     mocks.cancelBatch.mockResolvedValue(undefined);
     mocks.getBatchState.mockResolvedValue(null);
     mocks.confirmPendingOutput.mockResolvedValue({});
+    mocks.selectCandidateTitle.mockResolvedValue({});
     mocks.undoBatch.mockResolvedValue({ deleted: 1, skippedMissing: 0, skippedModified: 0 });
     mocks.listHistory.mockResolvedValue({
       total: 1,
@@ -253,5 +257,248 @@ describe("App", () => {
     await waitFor(() =>
       expect(mocks.startBatch).toHaveBeenCalledWith(["/input/folder"], settingsFixture),
     );
+  });
+
+  it("shows duplicate warnings without blocking output", async () => {
+    let emitBatchEvent: ((event: unknown) => void) | undefined;
+    mocks.subscribeBatchEvents.mockImplementation(async (handler) => {
+      emitBatchEvent = handler;
+      return () => undefined;
+    });
+    await renderApp();
+
+    await waitFor(() => expect(emitBatchEvent).toBeDefined());
+    act(() => {
+      emitBatchEvent?.({ type: "BatchStarted", batchId: "batch-1", createdAt: "now", totalFiles: 1 });
+      emitBatchEvent?.({
+        type: "FileQueued",
+        batchId: "batch-1",
+        file: fileView({
+          fileJobId: "file-duplicate",
+          fileName: "2.pdf",
+          sourcePath: "/Users/example/Desktop/2.pdf",
+          status: "queued",
+          duplicateWarning:
+            "疑似重复：历史批次 batch-old 的文件 file-old 已输出到 /Users/example/Desktop/Rustitler 输出/旧标题.pdf。",
+        }),
+      });
+      emitBatchEvent?.({
+        type: "FileProgress",
+        batchId: "batch-1",
+        fileJobId: "file-duplicate",
+        stage: "extract",
+        progress: 0,
+      });
+      emitBatchEvent?.({
+        type: "FileOutputCreated",
+        batchId: "batch-1",
+        fileJobId: "file-duplicate",
+        outputPath: "/Users/example/Desktop/Rustitler 输出/新标题.pdf",
+      });
+    });
+
+    expect(screen.getAllByText("/Users/example/Desktop/Rustitler 输出/新标题.pdf").length).toBeGreaterThan(0);
+    expect(screen.queryByText("失败原因")).not.toBeInTheDocument();
+    expect(screen.queryByText("重复提示")).not.toBeInTheDocument();
+    expect(screen.queryByText("处理日志")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("文件名主体")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "确认输出" })).not.toBeInTheDocument();
+  });
+
+  it("shows only the top five title candidates in file details", async () => {
+    let emitBatchEvent: ((event: unknown) => void) | undefined;
+    mocks.subscribeBatchEvents.mockImplementation(async (handler) => {
+      emitBatchEvent = handler;
+      return () => undefined;
+    });
+    await renderApp();
+
+    await waitFor(() => expect(emitBatchEvent).toBeDefined());
+    const candidates = Array.from({ length: 6 }, (_, index) => ({
+      text: `候选标题 ${index + 1}`,
+      source: "pdfLayout" as const,
+      pageIndex: 0,
+      score: 90 - index,
+      categoryScores: {
+        layout: 30,
+        position: 20,
+        keyword: 15,
+        textQuality: 20,
+        penalty: 0,
+      },
+      ruleDetails: [],
+    }));
+    act(() => {
+      emitBatchEvent?.({ type: "BatchStarted", batchId: "batch-1", createdAt: "now", totalFiles: 1 });
+      emitBatchEvent?.({
+        type: "FileQueued",
+        batchId: "batch-1",
+        file: fileView({
+          fileJobId: "file-candidates",
+          fileName: "many.pdf",
+          sourcePath: "/input/many.pdf",
+          status: "queued",
+        }),
+      });
+      emitBatchEvent?.({
+        type: "FileScored",
+        batchId: "batch-1",
+        fileJobId: "file-candidates",
+        result: scoringResult({
+          finalTitle: "候选标题 1",
+          confidence: 90,
+          candidates,
+        }),
+      });
+    });
+
+    const candidatesSection = screen.getByRole("heading", { name: "候选标题" }).closest("section");
+
+    expect(candidatesSection).not.toBeNull();
+    expect(within(candidatesSection!).getByText("候选标题 1")).toBeInTheDocument();
+    expect(within(candidatesSection!).getByText("候选标题 5")).toBeInTheDocument();
+    expect(within(candidatesSection!).queryByText("候选标题 6")).not.toBeInTheDocument();
+  });
+
+  it("keeps candidate details collapsed and trims file facts by default", async () => {
+    let emitBatchEvent: ((event: unknown) => void) | undefined;
+    mocks.subscribeBatchEvents.mockImplementation(async (handler) => {
+      emitBatchEvent = handler;
+      return () => undefined;
+    });
+    await renderApp();
+
+    await waitFor(() => expect(emitBatchEvent).toBeDefined());
+    act(() => {
+      emitBatchEvent?.({ type: "BatchStarted", batchId: "batch-1", createdAt: "now", totalFiles: 1 });
+      emitBatchEvent?.({
+        type: "FileQueued",
+        batchId: "batch-1",
+        file: fileView({
+          fileJobId: "file-details",
+          fileName: "details.pdf",
+          sourcePath: "/input/details.pdf",
+          status: "queued",
+          duplicateWarning: "疑似重复：旧文件。",
+        }),
+      });
+      emitBatchEvent?.({
+        type: "FileScored",
+        batchId: "batch-1",
+        fileJobId: "file-details",
+        result: scoringResult({
+          finalTitle: "精简详情标题",
+          confidence: 88,
+        }),
+      });
+      emitBatchEvent?.({
+        type: "FileOutputCreated",
+        batchId: "batch-1",
+        fileJobId: "file-details",
+        outputPath: "/input/Rustitler 输出/精简详情标题.pdf",
+      });
+    });
+
+    const detailPanel = screen.getByRole("heading", { name: "详情" }).closest("aside");
+    const candidatesSection = screen.getByRole("heading", { name: "候选标题" }).closest("section");
+
+    expect(detailPanel).not.toBeNull();
+    expect(within(detailPanel!).getByText("/input/details.pdf")).toBeInTheDocument();
+    expect(within(detailPanel!).getByText("最终标题")).toBeInTheDocument();
+    expect(within(detailPanel!).getByText("精简详情标题")).toBeInTheDocument();
+    expect(within(detailPanel!).getByText("置信度")).toBeInTheDocument();
+    expect(within(detailPanel!).getByText("88%")).toBeInTheDocument();
+    expect(within(detailPanel!).queryByText("输出路径")).not.toBeInTheDocument();
+    expect(within(detailPanel!).queryByText("失败原因")).not.toBeInTheDocument();
+    expect(within(detailPanel!).queryByText("重复提示")).not.toBeInTheDocument();
+    expect(within(detailPanel!).queryByText("处理日志")).not.toBeInTheDocument();
+
+    expect(candidatesSection).not.toBeNull();
+    expect(Array.from(candidatesSection!.querySelectorAll("details")).every((detail) => !detail.open)).toBe(true);
+  });
+
+  it("selects a visible candidate title for output", async () => {
+    let emitBatchEvent: ((event: unknown) => void) | undefined;
+    mocks.subscribeBatchEvents.mockImplementation(async (handler) => {
+      emitBatchEvent = handler;
+      return () => undefined;
+    });
+    mocks.selectCandidateTitle.mockResolvedValue(
+      fileView({
+        fileJobId: "file-select",
+        fileName: "select.pdf",
+        sourcePath: "/input/select.pdf",
+        status: "outputCreated",
+        recognizedTitle: "第二候选标题",
+        confidence: 76,
+        outputPath: "/input/Rustitler 输出/第二候选标题.pdf",
+      }),
+    );
+    await renderApp();
+
+    await waitFor(() => expect(emitBatchEvent).toBeDefined());
+    act(() => {
+      emitBatchEvent?.({ type: "BatchStarted", batchId: "batch-1", createdAt: "now", totalFiles: 1 });
+      emitBatchEvent?.({
+        type: "FileQueued",
+        batchId: "batch-1",
+        file: fileView({
+          fileJobId: "file-select",
+          fileName: "select.pdf",
+          sourcePath: "/input/select.pdf",
+          status: "queued",
+        }),
+      });
+      emitBatchEvent?.({
+        type: "FileScored",
+        batchId: "batch-1",
+        fileJobId: "file-select",
+        result: scoringResult({
+          finalTitle: "第一候选标题",
+          confidence: 90,
+          candidates: [
+            {
+              text: "第一候选标题",
+              source: "pdfLayout",
+              pageIndex: 0,
+              score: 90,
+              categoryScores: {
+                layout: 30,
+                position: 20,
+                keyword: 20,
+                textQuality: 20,
+                penalty: 0,
+              },
+              ruleDetails: [],
+            },
+            {
+              text: "第二候选标题",
+              source: "pdfLayout",
+              pageIndex: 0,
+              score: 76,
+              categoryScores: {
+                layout: 25,
+                position: 18,
+                keyword: 15,
+                textQuality: 18,
+                penalty: 0,
+              },
+              ruleDetails: [],
+            },
+          ],
+        }),
+      });
+    });
+
+    const candidatesSection = screen.getByRole("heading", { name: "候选标题" }).closest("section");
+    const detailPanel = screen.getByRole("heading", { name: "详情" }).closest("aside");
+    expect(candidatesSection).not.toBeNull();
+    expect(detailPanel).not.toBeNull();
+    const useButtons = within(candidatesSection!).getAllByRole("button", { name: "使用" });
+    fireEvent.click(useButtons[1]);
+
+    await waitFor(() => expect(mocks.selectCandidateTitle).toHaveBeenCalledWith("file-select", "第二候选标题"));
+    expect(within(detailPanel!).getByText("最终标题").nextElementSibling).toHaveTextContent("第二候选标题");
+    expect(within(detailPanel!).getByText("置信度").nextElementSibling).toHaveTextContent("76%");
   });
 });

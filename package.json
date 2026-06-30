@@ -12,6 +12,7 @@
     "test:offline-package-workflow": "node --test scripts/offline-package-workflow.node-test.mjs",
     "test:package-size-report": "node --test scripts/package-size-report.node-test.mjs",
     "tauri": "tauri",
+    "tauri:dev:offline": "npm run prepare:offline-assets && tauri dev --features offline-bundle",
     "prepare:offline-assets": "node scripts/prepare-offline-assets.mjs",
     "package:size-report": "node scripts/package-size-report.mjs",
     "tauri:build:offline": "npm run prepare:offline-assets && tauri build --features offline-bundle",

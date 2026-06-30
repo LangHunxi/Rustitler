@@ -125,14 +125,7 @@ fn queued_job(
     fingerprint: SourceFingerprint,
     duplicate: Option<DuplicateMatch>,
 ) -> Result<FileJob, AppError> {
-    let (status, pending_reason, failure_reason) = match duplicate {
-        Some(duplicate) => (
-            FileStatus::Pending,
-            Some(PendingReason::DuplicateSuspected),
-            Some(duplicate_message(&duplicate)),
-        ),
-        None => (FileStatus::Queued, None, None),
-    };
+    let duplicate_warning = duplicate.as_ref().map(duplicate_message);
 
     Ok(FileJob {
         file_job_id: FileJobId(Uuid::new_v4().to_string()),
@@ -141,13 +134,14 @@ fn queued_job(
         source_parent_path: source_parent_path.map(|path| path.display().to_string()),
         file_name: file_name_string(path)?,
         file_type,
-        status,
+        status: FileStatus::Queued,
         fingerprint,
         recognized_title: None,
         confidence: None,
         output_path: None,
-        failure_reason,
-        pending_reason,
+        failure_reason: None,
+        pending_reason: None,
+        duplicate_warning,
     })
 }
 
@@ -172,6 +166,7 @@ fn unsupported_file_job(
         output_path: None,
         failure_reason: Some("不支持的文件格式，已跳过。".into()),
         pending_reason: Some(PendingReason::UnsupportedFormat),
+        duplicate_warning: None,
     })
 }
 
@@ -195,6 +190,7 @@ fn skipped_directory_job(
         output_path: None,
         failure_reason: Some("子文件夹不递归扫描，已作为不处理项跳过。".into()),
         pending_reason: Some(PendingReason::UnsupportedFormat),
+        duplicate_warning: None,
     })
 }
 
@@ -397,7 +393,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_inputs_marks_supported_duplicate_as_pending() {
+    fn scan_inputs_marks_supported_duplicate_as_queued_with_warning() {
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("合同.pdf");
         fs::write(&source, b"same").unwrap();
@@ -413,18 +409,16 @@ mod tests {
         .unwrap();
 
         assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].status, FileStatus::Pending);
-        assert!(matches!(
-            jobs[0].pending_reason.as_ref(),
-            Some(PendingReason::DuplicateSuspected)
-        ));
+        assert_eq!(jobs[0].status, FileStatus::Queued);
+        assert_eq!(jobs[0].pending_reason, None);
+        assert_eq!(jobs[0].failure_reason, None);
         assert!(jobs[0]
-            .failure_reason
+            .duplicate_warning
             .as_deref()
             .unwrap()
             .contains("old-batch"));
         assert!(jobs[0]
-            .failure_reason
+            .duplicate_warning
             .as_deref()
             .unwrap()
             .contains("/output/合同.pdf"));
