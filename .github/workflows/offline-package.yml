@@ -282,22 +282,12 @@ jobs:
           path: release-artifacts
 
       - name: Collect release assets
-        shell: bash
         run: |
-          set -euo pipefail
-          mkdir -p release-assets
-
-          find release-artifacts -type f \
-            \( -name "*.dmg" -o -name "*.msi" -o -name "*.exe" -o -name "*.md" -o -name "*.json" \) \
-            -print0 |
-            while IFS= read -r -d '' file; do
-              artifact="$(echo "$file" | cut -d/ -f2)"
-              name="$(basename "$file")"
-              cp "$file" "release-assets/${artifact}-${name}"
-            done
-
-          find release-assets -maxdepth 1 -type f -print | sort
-          test "$(find release-assets -type f | wc -l)" -gt 0
+          node scripts/collect-release-assets.mjs \
+            --input release-artifacts \
+            --output release-assets \
+            --product-name Rustitler \
+            --tag "$GITHUB_REF_NAME"
 
       - name: Create or update release
         shell: bash
@@ -315,7 +305,7 @@ jobs:
             echo
             echo "- macOS and Windows bundles were built with \`offline-bundle\`."
             echo "- Packaged-binary smoke tests verified bundled OCR assets, image OCR, settings, and history."
-            echo "- Package size reports are attached as release assets."
+            echo "- Release assets include only the macOS \`.dmg\` and Windows \`.exe\` installers."
             echo
             echo "Note: LibreOffice \`.doc\` conversion remains pending until real LibreOffice runtime assets are bundled."
           } > "$notes_file"

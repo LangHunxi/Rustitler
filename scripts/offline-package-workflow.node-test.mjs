@@ -10,3 +10,13 @@ test("Windows smoke step waits for the packaged GUI process and report file", ()
   assert.match(workflow, /Test-Path \$smokeReport/);
   assert.match(workflow, /Start-Sleep -Seconds 1/);
 });
+
+test("release job publishes only short installer asset names", () => {
+  assert.match(workflow, /node scripts\/collect-release-assets\.mjs/);
+  assert.match(workflow, /--product-name Rustitler/);
+  assert.match(workflow, /--tag "\$GITHUB_REF_NAME"/);
+  assert.doesNotMatch(workflow, /-name "\*\.msi"/);
+  assert.doesNotMatch(workflow, /-name "\*\.md"/);
+  assert.doesNotMatch(workflow, /-name "\*\.json"/);
+  assert.doesNotMatch(workflow, /release-assets\/\$\{artifact\}-\$\{name\}/);
+});
