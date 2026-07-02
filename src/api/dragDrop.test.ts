@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const onWebviewDragDropEventMock = vi.fn();
 const onWindowDragDropEventMock = vi.fn();
@@ -16,6 +16,11 @@ vi.mock("@tauri-apps/api/window", () => ({
 }));
 
 describe("file drop subscription", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.clearAllMocks();
+  });
+
   it("subscribes to current webview and window drag-drop events and forwards dropped paths", async () => {
     const unlistenWebview = vi.fn();
     const unlistenWindow = vi.fn();
@@ -38,5 +43,25 @@ describe("file drop subscription", () => {
     unlisten();
     expect(unlistenWebview).toHaveBeenCalled();
     expect(unlistenWindow).toHaveBeenCalled();
+  });
+
+  it("forwards the same drop gesture only once when both Tauri targets emit it", async () => {
+    onWebviewDragDropEventMock.mockResolvedValueOnce(vi.fn());
+    onWindowDragDropEventMock.mockResolvedValueOnce(vi.fn());
+    const onDrop = vi.fn();
+    const { subscribeFileDrops } = await import("./dragDrop");
+
+    await subscribeFileDrops(onDrop);
+    const webviewHandler = onWebviewDragDropEventMock.mock.calls[0][0];
+    const windowHandler = onWindowDragDropEventMock.mock.calls[0][0];
+    const dropPayload = {
+      payload: { type: "drop", paths: ["/input/a.pdf"], position: { x: 1, y: 2 } },
+    };
+
+    webviewHandler(dropPayload);
+    windowHandler(dropPayload);
+
+    expect(onDrop).toHaveBeenCalledTimes(1);
+    expect(onDrop).toHaveBeenCalledWith(["/input/a.pdf"]);
   });
 });

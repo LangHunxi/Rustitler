@@ -454,8 +454,11 @@ fn extract_pdf(
             paragraphs: vec![],
             diagnostics_ref: None,
         }),
-        Ok(_) => extract_pdf_ocr_fallback(request, services, work_dir),
-        Err(_) => extract_pdf_ocr_fallback(request, services, work_dir),
+        Ok(pages) => {
+            let ocr_pages = fallback_page_numbers_from_native_pages(&pages);
+            extract_pdf_ocr_fallback(request, services, work_dir, &ocr_pages)
+        }
+        Err(_) => extract_pdf_ocr_fallback(request, services, work_dir, &[1, 2, 3]),
     }
 }
 
@@ -463,10 +466,11 @@ fn extract_pdf_ocr_fallback(
     request: &ExtractRequest,
     services: &ExtractionServices<'_>,
     work_dir: &Path,
+    page_numbers: &[usize],
 ) -> Result<ExtractedDocument, AppError> {
     let rasterized_pages = services
         .rasterizer
-        .rasterize_pages(&request.source_path, &[1, 2, 3], work_dir)
+        .rasterize_pages(&request.source_path, page_numbers, work_dir)
         .map_err(|err| pdf_ocr_error(&request.source_path, err))?;
     let pages = ocr_rasterized_pages(services, rasterized_pages)
         .map_err(|err| pdf_ocr_error(&request.source_path, err))?;
@@ -478,6 +482,21 @@ fn extract_pdf_ocr_fallback(
         paragraphs: vec![],
         diagnostics_ref: None,
     })
+}
+
+fn fallback_page_numbers_from_native_pages(pages: &[RawPdfPage]) -> Vec<usize> {
+    let mut page_numbers = pages
+        .iter()
+        .map(|page| page.page_index + 1)
+        .collect::<Vec<_>>();
+    page_numbers.sort_unstable();
+    page_numbers.dedup();
+
+    if page_numbers.is_empty() {
+        vec![1, 2, 3]
+    } else {
+        page_numbers
+    }
 }
 
 fn extract_image(
@@ -1211,12 +1230,72 @@ mod tests {
         assert_eq!(doc.pages[0].blocks[0].text, "扫描件标题");
         assert_eq!(
             services.rasterizer.last_pages.borrow().as_slice(),
-            &[1, 2, 3]
+            &[1]
         );
         assert_eq!(
             services.ocr.last_inputs.borrow()[0].image_path.as_path(),
             image_path.as_path()
         );
+    }
+
+    #[test]
+    fn pdf_ocr_fallback_rasterizes_only_existing_native_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let page_1 = dir.path().join("page-1.png");
+        let page_2 = dir.path().join("page-2.png");
+        let services = test_services()
+            .with_pdf_pages(vec![
+                RawPdfPage {
+                    page_index: 0,
+                    width: 600.0,
+                    height: 800.0,
+                    blocks: vec![],
+                },
+                RawPdfPage {
+                    page_index: 1,
+                    width: 600.0,
+                    height: 800.0,
+                    blocks: vec![],
+                },
+            ])
+            .with_rasterized_pages(vec![
+                RasterizedPage {
+                    page_index: 0,
+                    width: 1200,
+                    height: 1600,
+                    image_path: page_1,
+                },
+                RasterizedPage {
+                    page_index: 1,
+                    width: 1200,
+                    height: 1600,
+                    image_path: page_2,
+                },
+            ])
+            .with_ocr_pages(vec![
+                OcrPage {
+                    page_index: 0,
+                    width: 1200,
+                    height: 1600,
+                    blocks: vec![],
+                },
+                OcrPage {
+                    page_index: 1,
+                    width: 1200,
+                    height: 1600,
+                    blocks: vec![ocr_block("第二页扫描标题", 0.2, 0.1, 0.8, 0.16, 88.0)],
+                },
+            ]);
+        let request = request(FileType::Pdf, dir.path().join("two-page-scan.pdf"));
+
+        let doc = extract_document_with_services(&request, &services.refs(), dir.path()).unwrap();
+
+        assert_eq!(doc.extract_method, ExtractMethod::PdfOcrFallbackTesseract);
+        assert_eq!(
+            services.rasterizer.last_pages.borrow().as_slice(),
+            &[1, 2]
+        );
+        assert_eq!(doc.pages[1].blocks[0].text, "第二页扫描标题");
     }
 
     #[test]
@@ -1280,7 +1359,7 @@ mod tests {
         assert_eq!(doc.pages[0].blocks[0].text, "中华人民共和国自然保护区条例");
         assert_eq!(
             services.rasterizer.last_pages.borrow().as_slice(),
-            &[1, 2, 3]
+            &[1]
         );
     }
 

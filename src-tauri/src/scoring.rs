@@ -39,7 +39,7 @@ fn collect_candidates(
             candidates.extend(page.blocks.iter().filter_map(|block| {
                 score_layout_block(block, page.page_index, &extracted.extract_method, profile)
             }));
-            candidates.extend(score_two_line_title_candidates(
+            candidates.extend(score_multi_line_title_candidates(
                 &page.blocks,
                 page.page_index,
                 &extracted.extract_method,
@@ -78,18 +78,20 @@ fn score_two_paragraph_title_candidates(
     paragraphs
         .windows(2)
         .filter_map(|pair| {
-            build_two_paragraph_title(pair[0], pair[1]).and_then(|combined| {
-                let mut candidate = score_paragraph(&combined, profile)?;
-                candidate.rule_details.push(RuleDetail {
-                    rule_name: "word-two-paragraph-title".into(),
-                    category: "textQuality".into(),
-                    delta: 12,
-                    description: "相邻 Word 段落合并为标题候选".into(),
-                });
-                candidate.category_scores.text_quality += 12;
-                candidate.score = candidate.score.saturating_add(12).min(100);
-                Some(candidate)
-            })
+            build_two_paragraph_title(pair[0], pair[1], profile.max_title_chars).and_then(
+                |combined| {
+                    let mut candidate = score_paragraph(&combined, profile)?;
+                    candidate.rule_details.push(RuleDetail {
+                        rule_name: "word-two-paragraph-title".into(),
+                        category: "textQuality".into(),
+                        delta: 12,
+                        description: "相邻 Word 段落合并为标题候选".into(),
+                    });
+                    candidate.category_scores.text_quality += 12;
+                    candidate.score = candidate.score.saturating_add(12).min(100);
+                    Some(candidate)
+                },
+            )
         })
         .collect()
 }
@@ -97,6 +99,7 @@ fn score_two_paragraph_title_candidates(
 fn build_two_paragraph_title(
     first: &ParagraphBlock,
     second: &ParagraphBlock,
+    max_title_chars: u16,
 ) -> Option<ParagraphBlock> {
     let first_text = clean_candidate_text(&first.text);
     let second_text = clean_candidate_text(&second.text);
@@ -117,7 +120,8 @@ fn build_two_paragraph_title(
         second_text.split_whitespace().collect::<String>()
     );
     let combined_char_count = combined_text.chars().count();
-    if !(6..=60).contains(&combined_char_count)
+    if combined_char_count < 6
+        || combined_char_count > max_title_chars as usize
         || looks_like_sentence(&combined_text)
         || looks_like_promulgation_sentence(&combined_text)
         || !looks_like_word_title_continuation(&second_text)
@@ -131,7 +135,7 @@ fn build_two_paragraph_title(
     })
 }
 
-fn score_two_line_title_candidates(
+fn score_multi_line_title_candidates(
     blocks: &[LayoutBlock],
     page_index: usize,
     extract_method: &ExtractMethod,
@@ -145,75 +149,106 @@ fn score_two_line_title_candidates(
             .then_with(|| a.bbox.x0.total_cmp(&b.bbox.x0))
     });
 
-    ordered_blocks
-        .windows(2)
-        .filter_map(|pair| {
-            let first = pair[0];
-            let second = pair[1];
-            build_two_line_title_block(first, second).and_then(|combined| {
+    let mut candidates = vec![];
+    for line_count in 2..=3 {
+        candidates.extend(ordered_blocks.windows(line_count).filter_map(|lines| {
+            build_multi_line_title_block(lines, profile.max_title_chars).and_then(|combined| {
                 let mut candidate =
                     score_layout_block(&combined, page_index, extract_method, profile)?;
+                let rule_name = if line_count == 2 {
+                    "layout-two-line-title"
+                } else {
+                    "layout-three-line-title"
+                };
+                let delta = if line_count == 2 { 8 } else { 12 };
                 candidate.rule_details.push(RuleDetail {
-                    rule_name: "layout-two-line-title".into(),
+                    rule_name: rule_name.into(),
                     category: "layout".into(),
-                    delta: 8,
-                    description: "相邻两行版式接近，合并为标题候选".into(),
+                    delta,
+                    description: if line_count == 2 {
+                        "相邻两行版式接近，合并为标题候选".into()
+                    } else {
+                        "相邻三行版式接近，合并为标题候选".into()
+                    },
                 });
-                candidate.category_scores.layout += 8;
-                candidate.score = candidate.score.saturating_add(8).min(100);
+                candidate.category_scores.layout += delta;
+                candidate.score = candidate.score.saturating_add(delta as u8).min(100);
                 Some(candidate)
             })
-        })
-        .collect()
+        }));
+    }
+
+    candidates
 }
 
-fn build_two_line_title_block(first: &LayoutBlock, second: &LayoutBlock) -> Option<LayoutBlock> {
-    let first_text = clean_candidate_text(&first.text);
-    let second_text = clean_candidate_text(&second.text);
-    if first_text.is_empty()
-        || second_text.is_empty()
-        || is_symbol_only_noise(&first_text)
-        || is_symbol_only_noise(&second_text)
-        || looks_like_noise(&first_text)
-        || looks_like_noise(&second_text)
-    {
+fn build_multi_line_title_block(
+    lines: &[&LayoutBlock],
+    max_title_chars: u16,
+) -> Option<LayoutBlock> {
+    if !(2..=3).contains(&lines.len()) {
         return None;
     }
 
-    let combined_text = format!(
-        "{}{}",
-        first_text.split_whitespace().collect::<String>(),
-        second_text.split_whitespace().collect::<String>()
-    );
+    let line_texts = lines
+        .iter()
+        .map(|line| clean_candidate_text(&line.text))
+        .collect::<Vec<_>>();
+    if line_texts.iter().any(|text| {
+        text.is_empty()
+            || is_symbol_only_noise(text)
+            || looks_like_noise(text)
+            || looks_like_sentence(text)
+    }) {
+        return None;
+    }
+
+    let combined_text = line_texts
+        .iter()
+        .map(|text| text.split_whitespace().collect::<String>())
+        .collect::<String>();
     let combined_char_count = combined_text.chars().count();
-    if !(6..=60).contains(&combined_char_count)
+    if combined_char_count < 6
+        || combined_char_count > max_title_chars as usize
         || looks_like_sentence(&combined_text)
         || looks_like_promulgation_sentence(&combined_text)
     {
         return None;
     }
 
-    if !two_lines_have_title_geometry(first, second) {
+    if !lines
+        .windows(2)
+        .all(|pair| two_lines_have_title_geometry(pair[0], pair[1]))
+    {
         return None;
     }
 
     Some(LayoutBlock {
         text: combined_text,
         bbox: NormalizedBox {
-            x0: first.bbox.x0.min(second.bbox.x0),
-            y0: first.bbox.y0.min(second.bbox.y0),
-            x1: first.bbox.x1.max(second.bbox.x1),
-            y1: first.bbox.y1.max(second.bbox.y1),
+            x0: lines
+                .iter()
+                .map(|line| line.bbox.x0)
+                .fold(f32::INFINITY, f32::min),
+            y0: lines
+                .iter()
+                .map(|line| line.bbox.y0)
+                .fold(f32::INFINITY, f32::min),
+            x1: lines
+                .iter()
+                .map(|line| line.bbox.x1)
+                .fold(f32::NEG_INFINITY, f32::max),
+            y1: lines
+                .iter()
+                .map(|line| line.bbox.y1)
+                .fold(f32::NEG_INFINITY, f32::max),
         },
         raw_bbox: None,
-        font_size: average_optional(first.font_size, second.font_size),
-        bold: match (first.bold, second.bold) {
-            (Some(true), Some(true)) => Some(true),
-            (Some(false), Some(false)) => Some(false),
-            _ => None,
-        },
-        ocr_confidence: average_optional(first.ocr_confidence, second.ocr_confidence),
-        line_index: first.line_index,
+        font_size: average_optional_values(lines.iter().filter_map(|line| line.font_size)),
+        bold: merge_optional_bold(lines.iter().map(|line| line.bold)),
+        ocr_confidence: average_optional_values(
+            lines.iter().filter_map(|line| line.ocr_confidence),
+        ),
+        line_index: None,
     })
 }
 
@@ -258,11 +293,25 @@ fn two_lines_have_title_geometry(first: &LayoutBlock, second: &LayoutBlock) -> b
     true
 }
 
-fn average_optional(first: Option<f32>, second: Option<f32>) -> Option<f32> {
-    match (first, second) {
-        (Some(first), Some(second)) => Some((first + second) / 2.0),
-        (Some(value), None) | (None, Some(value)) => Some(value),
-        (None, None) => None,
+fn average_optional_values(values: impl Iterator<Item = f32>) -> Option<f32> {
+    let mut sum = 0.0;
+    let mut count = 0;
+    for value in values {
+        sum += value;
+        count += 1;
+    }
+
+    (count > 0).then_some(sum / count as f32)
+}
+
+fn merge_optional_bold(values: impl Iterator<Item = Option<bool>>) -> Option<bool> {
+    let collected = values.collect::<Vec<_>>();
+    if collected.iter().all(|value| *value == Some(true)) {
+        Some(true)
+    } else if collected.iter().all(|value| *value == Some(false)) {
+        Some(false)
+    } else {
+        None
     }
 }
 
@@ -274,6 +323,9 @@ fn score_layout_block(
 ) -> Option<CandidateTitle> {
     let text = clean_candidate_text(&block.text);
     if text.is_empty() || is_symbol_only_noise(&text) {
+        return None;
+    }
+    if text.chars().count() > profile.max_title_chars as usize {
         return None;
     }
 
@@ -302,6 +354,9 @@ fn score_layout_block(
 fn score_paragraph(paragraph: &ParagraphBlock, profile: &ScoringProfile) -> Option<CandidateTitle> {
     let text = clean_candidate_text(&paragraph.text);
     if text.is_empty() || is_symbol_only_noise(&text) {
+        return None;
+    }
+    if text.chars().count() > profile.max_title_chars as usize {
         return None;
     }
 
@@ -585,7 +640,7 @@ fn apply_position_rules(
 fn apply_line_shape_rules(context: &mut ScoreContext, block: &LayoutBlock, page_index: usize) {
     let width = block.bbox.x1 - block.bbox.x0;
     let char_count = context.text.chars().count();
-    if width >= 0.60 && char_count >= 24 {
+    if block.line_index.is_some() && width >= 0.60 && char_count >= 24 {
         context.add_rule("wide-body-line", "penalty", -20, "疑似正文整行");
     }
 
@@ -788,14 +843,25 @@ fn looks_like_word_title_continuation(text: &str) -> bool {
 
 fn looks_like_word_body_continuation(text: &str) -> bool {
     let body_starts = [
-        "正文", "各单位", "各部门", "根据", "按照", "为进一步", "现将", "请各", "附件", "联系人",
+        "正文",
+        "各单位",
+        "各部门",
+        "根据",
+        "按照",
+        "为进一步",
+        "现将",
+        "请各",
+        "附件",
+        "联系人",
     ];
 
     body_starts.iter().any(|prefix| text.starts_with(prefix))
         || text.contains("正文段落")
         || text.contains("段落内容")
         || looks_like_sentence(text)
-        || Regex::new(r"^[一二三四五六七八九十]+[、.．]").unwrap().is_match(text)
+        || Regex::new(r"^[一二三四五六七八九十]+[、.．]")
+            .unwrap()
+            .is_match(text)
 }
 
 fn is_punctuation(ch: char) -> bool {
@@ -898,6 +964,86 @@ mod tests {
             .rule_details
             .iter()
             .any(|rule| rule.rule_name == "layout-two-line-title"));
+    }
+
+    #[test]
+    fn combines_adjacent_pdf_title_three_lines_into_one_candidate() {
+        let result = score_document(
+            pdf_document(vec![
+                block(
+                    "关于开展自然保护地生态环境监管",
+                    0.22,
+                    0.12,
+                    0.78,
+                    0.16,
+                    Some(16.0),
+                    Some(false),
+                ),
+                block(
+                    "遥感监测线索核查整改工作",
+                    0.25,
+                    0.17,
+                    0.75,
+                    0.21,
+                    Some(16.0),
+                    Some(false),
+                ),
+                block(
+                    "有关事项并持续推进规范化建设的通知",
+                    0.19,
+                    0.22,
+                    0.81,
+                    0.26,
+                    Some(16.0),
+                    Some(false),
+                ),
+                block(
+                    "各单位要结合实际认真组织实施。",
+                    0.12,
+                    0.38,
+                    0.88,
+                    0.42,
+                    Some(11.0),
+                    Some(false),
+                ),
+            ]),
+            ScoringProfile::default(),
+        );
+
+        assert_eq!(
+            result.final_title.as_deref(),
+            Some("关于开展自然保护地生态环境监管遥感监测线索核查整改工作有关事项并持续推进规范化建设的通知")
+        );
+        assert!(result.candidates[0]
+            .rule_details
+            .iter()
+            .any(|rule| rule.rule_name == "layout-three-line-title"));
+    }
+
+    #[test]
+    fn filters_title_candidates_over_default_max_title_chars() {
+        let too_long_title =
+            "关于开展自然保护地生态环境监管遥感监测线索核查整改工作有关事项并持续推进规范化建设相关工作的通知";
+
+        let result = score_document(
+            pdf_document(vec![block(
+                too_long_title,
+                0.14,
+                0.12,
+                0.86,
+                0.17,
+                Some(22.0),
+                Some(true),
+            )]),
+            ScoringProfile::default(),
+        );
+
+        assert!(too_long_title.chars().count() > 45);
+        assert!(result
+            .candidates
+            .iter()
+            .all(|candidate| candidate.text != too_long_title));
+        assert!(result.final_title.is_none());
     }
 
     #[test]

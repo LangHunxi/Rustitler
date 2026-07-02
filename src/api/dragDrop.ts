@@ -3,10 +3,16 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { TauriDragDropEvent } from "../types/ipc";
 import type { StopListening } from "./events";
 
+const DUPLICATE_DROP_WINDOW_MS = 250;
+
+const dropSignature = (paths: string[]) => paths.join("\u0000");
+
 export const subscribeFileDrops = async (
   onDrop: (paths: string[]) => void,
   onActiveChange?: (active: boolean) => void,
 ): Promise<StopListening> => {
+  let lastDrop: { signature: string; at: number } | undefined;
+
   const handleDropEvent = (event: { payload: unknown }) => {
     const payload = event.payload as TauriDragDropEvent;
 
@@ -22,6 +28,16 @@ export const subscribeFileDrops = async (
 
     if (payload.type === "drop") {
       onActiveChange?.(false);
+      const signature = dropSignature(payload.paths);
+      const now = Date.now();
+      if (
+        lastDrop &&
+        lastDrop.signature === signature &&
+        now - lastDrop.at < DUPLICATE_DROP_WINDOW_MS
+      ) {
+        return;
+      }
+      lastDrop = { signature, at: now };
       onDrop(payload.paths);
     }
   };

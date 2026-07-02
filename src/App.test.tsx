@@ -32,6 +32,7 @@ const settingsFixture = {
   keywordSensitivity: 1,
   textQualitySensitivity: 1,
   ocrConservatism: 1,
+  maxTitleChars: 45,
   keywordRules: [{ keyword: "通知", scoreDelta: 5 }],
   regexRules: [],
   debugMode: false,
@@ -171,6 +172,7 @@ describe("App", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "设置" }));
     await waitFor(() => expect(screen.getByLabelText("自动输出阈值")).toHaveValue(70));
+    expect(screen.getByLabelText("标题最大字数")).toHaveValue(45);
     fireEvent.change(screen.getByLabelText("自动输出阈值"), { target: { value: "80" } });
     fireEvent.click(screen.getByRole("button", { name: "保存设置" }));
     await waitFor(() => expect(screen.getByText("设置已保存")).toBeInTheDocument());

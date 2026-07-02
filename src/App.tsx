@@ -568,6 +568,7 @@ function SettingsView() {
             <NumberField label="关键词敏感度" min={0} max={2} step={0.1} value={draft.keywordSensitivity} onChange={numberPatch("keywordSensitivity")} />
             <NumberField label="文本质量敏感度" min={0} max={2} step={0.1} value={draft.textQualitySensitivity} onChange={numberPatch("textQualitySensitivity")} />
             <NumberField label="OCR 保守度" min={0} max={2} step={0.1} value={draft.ocrConservatism} onChange={numberPatch("ocrConservatism")} />
+            <NumberField label="标题最大字数" min={10} max={120} value={draft.maxTitleChars} onChange={numberPatch("maxTitleChars")} />
           </div>
         </div>
 

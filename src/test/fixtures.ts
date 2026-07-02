@@ -27,6 +27,7 @@ export const defaultSettings = (): Settings => ({
   keywordSensitivity: 1,
   textQualitySensitivity: 1,
   ocrConservatism: 1,
+  maxTitleChars: 45,
   keywordRules: [{ keyword: "通知", scoreDelta: 5 }],
   regexRules: [],
   debugMode: false,

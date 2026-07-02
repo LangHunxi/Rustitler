@@ -175,8 +175,16 @@ pub struct ScoringProfile {
     pub keyword_sensitivity: f32,
     pub text_quality_sensitivity: f32,
     pub ocr_conservatism: f32,
+    #[serde(default = "default_max_title_chars")]
+    pub max_title_chars: u16,
     pub keyword_rules: Vec<KeywordRule>,
     pub regex_rules: Vec<RegexRule>,
+}
+
+pub const DEFAULT_MAX_TITLE_CHARS: u16 = 45;
+
+fn default_max_title_chars() -> u16 {
+    DEFAULT_MAX_TITLE_CHARS
 }
 
 impl Default for ScoringProfile {
@@ -188,6 +196,7 @@ impl Default for ScoringProfile {
             keyword_sensitivity: 1.0,
             text_quality_sensitivity: 1.0,
             ocr_conservatism: 1.0,
+            max_title_chars: DEFAULT_MAX_TITLE_CHARS,
             keyword_rules: vec![
                 KeywordRule {
                     keyword: "关于".into(),
@@ -293,6 +302,8 @@ pub struct Settings {
     pub keyword_sensitivity: f32,
     pub text_quality_sensitivity: f32,
     pub ocr_conservatism: f32,
+    #[serde(default = "default_max_title_chars")]
+    pub max_title_chars: u16,
     pub keyword_rules: Vec<KeywordRule>,
     pub regex_rules: Vec<RegexRule>,
     pub debug_mode: bool,
@@ -310,6 +321,7 @@ impl Default for Settings {
             keyword_sensitivity: profile.keyword_sensitivity,
             text_quality_sensitivity: profile.text_quality_sensitivity,
             ocr_conservatism: profile.ocr_conservatism,
+            max_title_chars: profile.max_title_chars,
             keyword_rules: profile.keyword_rules,
             regex_rules: profile.regex_rules,
             debug_mode: false,
@@ -326,6 +338,7 @@ impl From<&Settings> for ScoringProfile {
             keyword_sensitivity: settings.keyword_sensitivity,
             text_quality_sensitivity: settings.text_quality_sensitivity,
             ocr_conservatism: settings.ocr_conservatism,
+            max_title_chars: settings.max_title_chars,
             keyword_rules: settings.keyword_rules.clone(),
             regex_rules: settings.regex_rules.clone(),
         }
@@ -584,6 +597,7 @@ mod tests {
     fn scoring_profile_defaults() {
         let p = ScoringProfile::default();
         assert_eq!(p.auto_output_threshold, 70);
+        assert_eq!(p.max_title_chars, DEFAULT_MAX_TITLE_CHARS);
         assert!(p.keyword_rules.iter().any(|r| r.keyword == "通知"));
     }
 
@@ -639,6 +653,7 @@ mod tests {
                 "keywordSensitivity": 1.0,
                 "textQualitySensitivity": 1.0,
                 "ocrConservatism": 1.0,
+                "maxTitleChars": 45,
                 "keywordRules": [
                     { "keyword": "关于", "scoreDelta": 5 },
                     { "keyword": "通知", "scoreDelta": 5 },

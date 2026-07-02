@@ -10,6 +10,8 @@ use uuid::Uuid;
 pub const MAX_RULES: usize = 100;
 const MIN_SENSITIVITY: f32 = 0.0;
 const MAX_SENSITIVITY: f32 = 2.0;
+const MIN_TITLE_CHAR_LIMIT: u16 = 10;
+const MAX_TITLE_CHAR_LIMIT: u16 = 120;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -87,6 +89,11 @@ pub fn validate_settings(settings: &Settings) -> Result<(), AppError> {
     validate_sensitivity("关键词敏感度", settings.keyword_sensitivity)?;
     validate_sensitivity("文本质量敏感度", settings.text_quality_sensitivity)?;
     validate_sensitivity("OCR 保守度敏感度", settings.ocr_conservatism)?;
+    if !(MIN_TITLE_CHAR_LIMIT..=MAX_TITLE_CHAR_LIMIT).contains(&settings.max_title_chars) {
+        return Err(settings_error(format!(
+            "标题最大字数必须在 {MIN_TITLE_CHAR_LIMIT}-{MAX_TITLE_CHAR_LIMIT} 之间。"
+        )));
+    }
     validate_rule_count(settings.keyword_rules.len(), "关键词规则")?;
     validate_rule_count(settings.regex_rules.len(), "正则规则")?;
 
@@ -191,10 +198,12 @@ mod tests {
         let settings = load_settings(dir.path()).unwrap();
 
         assert_eq!(settings.auto_output_threshold, 70);
+        assert_eq!(settings.max_title_chars, 45);
         assert!(!settings.debug_mode);
         assert!(settings_path(dir.path()).exists());
         let json = std::fs::read_to_string(settings_path(dir.path())).unwrap();
         assert!(json.contains("\"autoOutputThreshold\": 70"));
+        assert!(json.contains("\"maxTitleChars\": 45"));
     }
 
     #[test]
@@ -212,6 +221,7 @@ mod tests {
         assert_eq!(saved.auto_output_threshold, 65);
         assert_eq!(loaded.auto_output_threshold, 65);
         assert_eq!(loaded.layout_sensitivity, 1.5);
+        assert_eq!(loaded.max_title_chars, 45);
         assert!(!dir.path().join("settings.json.tmp").exists());
     }
 
@@ -238,6 +248,27 @@ mod tests {
         let error = validate_settings(&settings).unwrap_err();
 
         assert!(error.user_message.contains("敏感度"));
+    }
+
+    #[test]
+    fn validate_rejects_invalid_title_char_limit() {
+        let too_small = Settings {
+            max_title_chars: 9,
+            ..Settings::default()
+        };
+        let too_large = Settings {
+            max_title_chars: 121,
+            ..Settings::default()
+        };
+
+        assert!(validate_settings(&too_small)
+            .unwrap_err()
+            .user_message
+            .contains("标题最大字数"));
+        assert!(validate_settings(&too_large)
+            .unwrap_err()
+            .user_message
+            .contains("标题最大字数"));
     }
 
     #[test]

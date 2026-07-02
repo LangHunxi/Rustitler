@@ -7,6 +7,9 @@ dist/
 src-tauri/target/
 target/
 
+# Local offline packaging assets
+src-tauri/resources/libreoffice/LibreOffice.app/
+
 *.log
 *.tmp
 *.swp

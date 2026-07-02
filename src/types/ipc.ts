@@ -253,6 +253,7 @@ export interface Settings {
   keywordSensitivity: number;
   textQualitySensitivity: number;
   ocrConservatism: number;
+  maxTitleChars: number;
   keywordRules: KeywordRule[];
   regexRules: RegexRule[];
   debugMode: boolean;
