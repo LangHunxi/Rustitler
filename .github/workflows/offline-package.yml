@@ -25,9 +25,19 @@ env:
 
 jobs:
   macos-package:
-    name: macOS offline package
+    name: macOS offline package (${{ matrix.libreoffice_label }})
     runs-on: macos-latest
-    timeout-minutes: 150
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: without-libreoffice
+            libreoffice_label: without LibreOffice
+            soffice_present: false
+          - variant: with-libreoffice
+            libreoffice_label: with LibreOffice
+            soffice_present: true
 
     steps:
       - name: Checkout
@@ -64,11 +74,60 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Remove bundled LibreOffice runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p src-tauri/resources/libreoffice
+          rm -rf src-tauri/resources/libreoffice/LibreOffice.app
+
+      - name: Install LibreOffice runtime
+        if: matrix.variant == 'with-libreoffice'
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install --cask libreoffice
+
+      - name: Prepare bundled LibreOffice runtime
+        if: matrix.variant == 'with-libreoffice'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p src-tauri/resources/libreoffice
+          ditto /Applications/LibreOffice.app src-tauri/resources/libreoffice/LibreOffice.app
+          test -x src-tauri/resources/libreoffice/LibreOffice.app/Contents/MacOS/soffice
+
       - name: Validate offline package workflow
         run: npm run test:node-scripts
 
       - name: Build macOS offline bundle
         run: npm run tauri:build:offline:ci
+
+      - name: Re-sign macOS bundle with LibreOffice
+        if: matrix.variant == 'with-libreoffice'
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="src-tauri/target/release/bundle/macos/Rustitler.app"
+          dmg_dir="src-tauri/target/release/bundle/dmg"
+          dmg_path="$(find "$dmg_dir" -maxdepth 1 -name '*.dmg' -print -quit)"
+
+          if [[ -z "$dmg_path" ]]; then
+            echo "No generated DMG found under $dmg_dir." >&2
+            exit 1
+          fi
+
+          codesign --force --deep --sign - "$app"
+          rm -f "$dmg_path"
+          "$dmg_dir/bundle_dmg.sh" \
+            --volname Rustitler \
+            --volicon "$dmg_dir/icon.icns" \
+            --icon Rustitler.app 128 128 \
+            --hide-extension Rustitler.app \
+            --app-drop-link 375 128 \
+            --no-internet-enable \
+            "$dmg_path" \
+            src-tauri/target/release/bundle/macos
 
       - name: Run packaged macOS smoke test
         shell: bash
@@ -77,7 +136,8 @@ jobs:
           app="src-tauri/target/release/bundle/macos/Rustitler.app"
           binary="$app/Contents/MacOS/Rustitler"
           resource_dir="$app/Contents/Resources"
-          smoke_report="$RUNNER_TEMP/rustitler-offline-smoke-report-macos.json"
+          smoke_report="$RUNNER_TEMP/rustitler-offline-smoke-report-macos-${{ matrix.variant }}.json"
+          expected_soffice="${{ matrix.soffice_present }}"
 
           test -x "$binary"
           test -f "$resource_dir/tessdata/chi_sim.traineddata"
@@ -85,12 +145,24 @@ jobs:
           "$binary" \
             --offline-smoke-test \
             --resource-dir "$resource_dir" \
-            --app-data-dir "$RUNNER_TEMP/rustitler-smoke-data" \
+            --app-data-dir "$RUNNER_TEMP/rustitler-smoke-data-${{ matrix.variant }}" \
             --report-path "$smoke_report" \
             --require-ocr
 
+          node - "$smoke_report" "$expected_soffice" <<'NODE'
+          const fs = require("node:fs");
+          const [reportPath, expectedRaw] = process.argv.slice(2);
+          const report = JSON.parse(fs.readFileSync(reportPath, "utf8"));
+          const expected = expectedRaw === "true";
+          if (report.checks.sofficePresent !== expected) {
+            throw new Error(
+              `Expected sofficePresent=${expected}, got ${report.checks.sofficePresent}`,
+            );
+          }
+          NODE
+
           {
-            echo "## macOS Offline Smoke Report"
+            echo "## macOS Offline Smoke Report (${{ matrix.libreoffice_label }})"
             echo
             echo '```json'
             cat "$smoke_report"
@@ -98,27 +170,45 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Verify macOS DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          dmg_path="$(find src-tauri/target/release/bundle/dmg -maxdepth 1 -name '*.dmg' -print -quit)"
+          test -n "$dmg_path"
+          hdiutil verify "$dmg_path"
+
       - name: Generate macOS package size report
         run: |
           npm run package:size-report -- \
-            --platform macos \
-            --output "$RUNNER_TEMP/rustitler-package-size-report-macos.md"
+            --platform "macos-${{ matrix.variant }}" \
+            --output "$RUNNER_TEMP/rustitler-package-size-report-macos-${{ matrix.variant }}.md"
 
       - name: Upload macOS package artifacts
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: rustitler-macos-offline-package
+          name: rustitler-macos-offline-package-${{ matrix.variant }}
           path: |
             src-tauri/target/release/bundle
-            ${{ runner.temp }}/rustitler-offline-smoke-report-macos.json
-            ${{ runner.temp }}/rustitler-package-size-report-macos.md
+            ${{ runner.temp }}/rustitler-offline-smoke-report-macos-${{ matrix.variant }}.json
+            ${{ runner.temp }}/rustitler-package-size-report-macos-${{ matrix.variant }}.md
           if-no-files-found: warn
 
   windows-package:
-    name: Windows offline package
+    name: Windows offline package (${{ matrix.libreoffice_label }})
     runs-on: windows-latest
-    timeout-minutes: 180
+    timeout-minutes: 210
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: without-libreoffice
+            libreoffice_label: without LibreOffice
+            soffice_present: false
+          - variant: with-libreoffice
+            libreoffice_label: with LibreOffice
+            soffice_present: true
 
     steps:
       - name: Checkout
@@ -155,6 +245,45 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Remove bundled LibreOffice runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $resourceDir = "src-tauri\resources\libreoffice"
+          New-Item -ItemType Directory -Force $resourceDir | Out-Null
+          Get-ChildItem $resourceDir -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -ne ".gitkeep" } |
+            Remove-Item -Recurse -Force
+
+      - name: Install LibreOffice runtime
+        if: matrix.variant == 'with-libreoffice'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          choco install libreoffice-fresh -y --no-progress
+
+      - name: Prepare bundled LibreOffice runtime
+        if: matrix.variant == 'with-libreoffice'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $source = @(
+            "C:\Program Files\LibreOffice",
+            "C:\Program Files (x86)\LibreOffice"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $source) {
+            throw "Installed LibreOffice directory was not found."
+          }
+
+          $target = "src-tauri\resources\libreoffice"
+          New-Item -ItemType Directory -Force $target | Out-Null
+          Copy-Item -Path (Join-Path $source "*") -Destination $target -Recurse -Force
+
+          $soffice = Join-Path $target "program\soffice.exe"
+          if (-not (Test-Path $soffice)) {
+            throw "Bundled soffice.exe was not copied to $soffice."
+          }
+
       - name: Validate offline package workflow
         run: npm run test:node-scripts
 
@@ -166,7 +295,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $installDir = Join-Path $env:RUNNER_TEMP "RustitlerInstall"
+          $installDir = Join-Path $env:RUNNER_TEMP "RustitlerInstall-${{ matrix.variant }}"
           New-Item -ItemType Directory -Force $installDir | Out-Null
 
           $installer = Get-ChildItem "src-tauri\target\release\bundle\nsis" -Filter "*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -201,8 +330,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $smokeReport = Join-Path $env:RUNNER_TEMP "rustitler-offline-smoke-report-windows.json"
-          $appDataDir = Join-Path $env:RUNNER_TEMP "rustitler-smoke-data"
+          $smokeReport = Join-Path $env:RUNNER_TEMP "rustitler-offline-smoke-report-windows-${{ matrix.variant }}.json"
+          $appDataDir = Join-Path $env:RUNNER_TEMP "rustitler-smoke-data-${{ matrix.variant }}"
           $env:RUSTITLER_SMOKE_REPORT_PATH = $smokeReport
 
           $arguments = @(
@@ -238,7 +367,12 @@ jobs:
             throw "Packaged Windows smoke test reported status '$($report.status)'."
           }
 
-          Add-Content $env:GITHUB_STEP_SUMMARY "## Windows Offline Smoke Report"
+          $expectedSofficePresent = [System.Convert]::ToBoolean("${{ matrix.soffice_present }}")
+          if ([bool]$report.checks.sofficePresent -ne $expectedSofficePresent) {
+            throw "Expected sofficePresent=$expectedSofficePresent, got $($report.checks.sofficePresent)."
+          }
+
+          Add-Content $env:GITHUB_STEP_SUMMARY "## Windows Offline Smoke Report (${{ matrix.libreoffice_label }})"
           Add-Content $env:GITHUB_STEP_SUMMARY ""
           Add-Content $env:GITHUB_STEP_SUMMARY '```json'
           Get-Content $smokeReport | Add-Content $env:GITHUB_STEP_SUMMARY
@@ -247,9 +381,9 @@ jobs:
       - name: Generate Windows package size report
         shell: pwsh
         run: |
-          $sizeReport = Join-Path $env:RUNNER_TEMP "rustitler-package-size-report-windows.md"
+          $sizeReport = Join-Path $env:RUNNER_TEMP "rustitler-package-size-report-windows-${{ matrix.variant }}.md"
           npm run package:size-report -- `
-            --platform windows `
+            --platform "windows-${{ matrix.variant }}" `
             --output $sizeReport
           if (-not (Test-Path $sizeReport)) {
             throw "Windows package size report was not written to $sizeReport."
@@ -260,11 +394,11 @@ jobs:
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: rustitler-windows-offline-package
+          name: rustitler-windows-offline-package-${{ matrix.variant }}
           path: |
             src-tauri/target/release/bundle
-            ${{ runner.temp }}/rustitler-offline-smoke-report-windows.json
-            ${{ runner.temp }}/rustitler-package-size-report-windows.md
+            ${{ runner.temp }}/rustitler-offline-smoke-report-windows-${{ matrix.variant }}.json
+            ${{ runner.temp }}/rustitler-package-size-report-windows-${{ matrix.variant }}.md
           if-no-files-found: warn
 
   release:
@@ -276,6 +410,9 @@ jobs:
     if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
 
     steps:
+      - name: Checkout release scripts
+        uses: actions/checkout@v4
+
       - name: Download package artifacts
         uses: actions/download-artifact@v4
         with:
@@ -304,10 +441,10 @@ jobs:
             echo "Offline package validation artifacts from GitHub Actions."
             echo
             echo "- macOS and Windows bundles were built with \`offline-bundle\`."
-            echo "- Packaged-binary smoke tests verified bundled OCR assets, image OCR, settings, and history."
-            echo "- Release assets include only the macOS \`.dmg\` and Windows \`.exe\` installers."
-            echo
-            echo "Note: LibreOffice \`.doc\` conversion remains pending until real LibreOffice runtime assets are bundled."
+            echo "- Packaged-binary smoke tests verified bundled OCR assets, image OCR, settings, history, and LibreOffice presence per variant."
+            echo "- Release assets include four installers: macOS and Windows, each with and without bundled LibreOffice."
+            echo "- Assets ending in \`with-libreoffice\` include the LibreOffice runtime for offline legacy \`.doc\` conversion."
+            echo "- Assets ending in \`without-libreoffice\` omit LibreOffice and rely on a system LibreOffice install for legacy \`.doc\` conversion."
           } > "$notes_file"
 
           if gh release view "$tag" >/dev/null 2>&1; then

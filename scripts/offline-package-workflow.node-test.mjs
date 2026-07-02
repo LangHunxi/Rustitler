@@ -15,8 +15,19 @@ test("release job publishes only short installer asset names", () => {
   assert.match(workflow, /node scripts\/collect-release-assets\.mjs/);
   assert.match(workflow, /--product-name Rustitler/);
   assert.match(workflow, /--tag "\$GITHUB_REF_NAME"/);
+  assert.match(workflow, /name: rustitler-macos-offline-package-\$\{\{ matrix\.variant \}\}/);
+  assert.match(workflow, /name: rustitler-windows-offline-package-\$\{\{ matrix\.variant \}\}/);
   assert.doesNotMatch(workflow, /-name "\*\.msi"/);
   assert.doesNotMatch(workflow, /-name "\*\.md"/);
   assert.doesNotMatch(workflow, /-name "\*\.json"/);
   assert.doesNotMatch(workflow, /release-assets\/\$\{artifact\}-\$\{name\}/);
+});
+
+test("package jobs build both LibreOffice variants", () => {
+  assert.match(workflow, /variant: without-libreoffice/);
+  assert.match(workflow, /variant: with-libreoffice/);
+  assert.match(workflow, /Install LibreOffice runtime/);
+  assert.match(workflow, /Prepare bundled LibreOffice runtime/);
+  assert.match(workflow, /sofficePresent/);
+  assert.match(workflow, /Release assets include four installers/);
 });

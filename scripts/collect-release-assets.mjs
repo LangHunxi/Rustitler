@@ -5,21 +5,24 @@ import process from "node:process";
 import { isMainModule } from "./module-entry.mjs";
 
 const TARGETS = [
-  {
-    platform: "macos",
-    extension: ".dmg",
-    matcher: (filePath) =>
-      path.extname(filePath).toLowerCase() === ".dmg" &&
-      filePath.includes(`rustitler-macos-offline-package${path.sep}`),
-  },
-  {
-    platform: "windows",
-    extension: ".exe",
-    matcher: (filePath) =>
-      path.extname(filePath).toLowerCase() === ".exe" &&
-      filePath.includes(`rustitler-windows-offline-package${path.sep}`),
-  },
+  releaseTarget("macos", "without-libreoffice", ".dmg"),
+  releaseTarget("macos", "with-libreoffice", ".dmg"),
+  releaseTarget("windows", "without-libreoffice", ".exe"),
+  releaseTarget("windows", "with-libreoffice", ".exe"),
 ];
+
+function releaseTarget(platform, variant, extension) {
+  const artifactName = `rustitler-${platform}-offline-package-${variant}`;
+  return {
+    platform,
+    variant,
+    extension,
+    artifactName,
+    matcher: (filePath) =>
+      path.extname(filePath).toLowerCase() === extension &&
+      filePath.includes(`${artifactName}${path.sep}`),
+  };
+}
 
 export function collectReleaseAssets({
   inputDir,
@@ -45,12 +48,14 @@ export function collectReleaseAssets({
   return TARGETS.map((target) => {
     const source = files.find(target.matcher);
     if (!source) {
-      throw new Error(`No ${target.platform} ${target.extension} installer found in ${inputDir}`);
+      throw new Error(
+        `No ${target.platform} ${target.variant} ${target.extension} installer found in ${inputDir}`,
+      );
     }
 
     const destination = path.join(
       outputDir,
-      `${productName}-${version}-${target.platform}${target.extension}`,
+      `${productName}-${version}-${target.platform}-${target.variant}${target.extension}`,
     );
     fs.copyFileSync(source, destination);
     return destination;
